@@ -124,7 +124,7 @@
         <div class="section-card">
           <h2>🧪 Test Cases</h2>
           <button onclick="openCase1Modal()" class="btn-full info">Case 1: Concurrent Reads</button>
-          <button onclick="runTestCase('case2')" class="btn-full info">Case 2: Write + Reads</button>
+          <button onclick="openCase2Modal()" class="btn-full info">Case 2: Write + Reads</button>
           <button onclick="runTestCase('case3')" class="btn-full info">Case 3: Concurrent Writes</button>
           <button onclick="runTestCase('failure1')" class="btn-full warning">Failure 1: Replication Fail</button>
           <button onclick="runTestCase('failure2')" class="btn-full warning">Failure 2: Node0 Recovery</button>
@@ -180,11 +180,61 @@
         <div id="case1Output" class="logs-container" style="margin-top:10px;"></div>
       </div>
     </div>
+    <!-- Case 2 Modal -->
+    <div id="case2Modal" class="modal" style="display:none;">
+      <div class="modal-content">
+        <span class="close-button" onclick="closeCase2Modal()">&times;</span>
+        <h2>Case 2: Write + Reads</h2>
+        <div class="form-group">
+          <label>Writer Node</label>
+          <select id="case2Writer">
+            <option value="node0">Node 0 (Master)</option>
+            <option value="node1">Node 1 (Fragment A)</option>
+            <option value="node2">Node 2 (Fragment B)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Reader Node A</label>
+          <select id="case2ReaderA">
+            <option value="node0">Node 0 (Master)</option>
+            <option value="node1">Node 1 (Fragment A)</option>
+            <option value="node2">Node 2 (Fragment B)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Reader Node B</label>
+          <select id="case2ReaderB">
+            <option value="node0">Node 0 (Master)</option>
+            <option value="node1">Node 1 (Fragment A)</option>
+            <option value="node2">Node 2 (Fragment B)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Record ID</label>
+          <input id="case2RecordId" type="number" placeholder="e.g. 1" />
+        </div>
+        <div class="form-group">
+          <label>New Amount Value</label>
+          <input id="case2NewValue" type="number" placeholder="e.g. 500" />
+        </div>
+        <div class="form-group">
+          <label>Isolation Level (Write & Reads)</label>
+          <select id="case2Isolation">
+            <option value="READ_UNCOMMITTED">Read Uncommitted</option>
+            <option value="READ_COMMITTED" selected>Read Committed</option>
+            <option value="REPEATABLE_READ">Repeatable Read</option>
+            <option value="SERIALIZABLE">Serializable</option>
+          </select>
+        </div>
+        <button onclick="runCase2()" class="btn-full primary">Run Write + Concurrent Reads</button>
+        <div id="case2Output" class="logs-container" style="margin-top:10px;"></div>
+      </div>
+    </div>
   </div>
 
   <script type="module">
     import * as app from './src/app.js';
-    import { case1ConcurrentReads, retryReplication } from './src/test-cases.js';
+    import { case1ConcurrentReads, case2WritePlusReads, retryReplication } from './src/test-cases.js';
     
     // Make app functions globally accessible
     window.app = app;
@@ -255,6 +305,54 @@
         <div class="log-entry"><strong>Node B Data</strong></div>
         <pre class="log-entry" style="white-space:pre-wrap;overflow:auto;max-height:200px;">${dataBJson}</pre>
       `;
+    };
+    // Case 2 controls
+    window.openCase2Modal = function(){
+      document.getElementById('case2Modal').style.display = 'block';
+    };
+    window.closeCase2Modal = function(){
+      document.getElementById('case2Modal').style.display = 'none';
+    };
+    window.runCase2 = async function(){
+      const writer = document.getElementById('case2Writer').value;
+      const readerA = document.getElementById('case2ReaderA').value;
+      const readerB = document.getElementById('case2ReaderB').value;
+      const recordId = document.getElementById('case2RecordId').value;
+      const newValue = document.getElementById('case2NewValue').value;
+      const isolation = document.getElementById('case2Isolation').value;
+      const out = document.getElementById('case2Output');
+      out.innerHTML = '<div class="log-entry">Running...</div>';
+      try {
+        const res = await case2WritePlusReads(writer, readerA, readerB, recordId, newValue, isolation);
+        const writeStatus = res.write?.status || 'FAIL';
+        const dataWriterArr = res.reads?.writer || [];
+        const dataAArr = res.reads?.readerA || [];
+        const dataBArr = res.reads?.readerB || [];
+        const equalA = JSON.stringify(dataWriterArr) === JSON.stringify(dataAArr);
+        const equalB = JSON.stringify(dataWriterArr) === JSON.stringify(dataBArr);
+        const dataWriter = JSON.stringify(dataWriterArr, null, 2);
+        const dataA = JSON.stringify(dataAArr, null, 2);
+        const dataB = JSON.stringify(dataBArr, null, 2);
+        const rep = res.write?.replication || [];
+        const repLines = rep.length ? rep.map(r => `Target: ${r.target} | Status: ${r.status}${r.error ? ' | Error: '+r.error : ''}`).join('\n') : 'No replication performed';
+        out.innerHTML = `
+          <div class="log-entry success">Isolation: ${isolation.replace('_',' ')}</div>
+          <div class="log-entry">Write Status: ${writeStatus}</div>
+          <div class="log-entry">Record ID: ${recordId} Updated To: ${newValue}</div>
+          <div class="log-entry">Consistency vs Reader A: ${equalA ? 'MATCH' : 'DIFF'}</div>
+          <div class="log-entry">Consistency vs Reader B: ${equalB ? 'MATCH' : 'DIFF'}</div>
+          <div class="log-entry"><strong>Replication Details</strong></div>
+          <pre class="log-entry" style="white-space:pre-wrap;overflow:auto;max-height:120px;">${repLines}</pre>
+          <div class="log-entry"><strong>Writer Node Data</strong></div>
+          <pre class="log-entry" style="white-space:pre-wrap;overflow:auto;max-height:150px;">${dataWriter}</pre>
+          <div class="log-entry"><strong>Reader A Data</strong></div>
+          <pre class="log-entry" style="white-space:pre-wrap;overflow:auto;max-height:150px;">${dataA}</pre>
+          <div class="log-entry"><strong>Reader B Data</strong></div>
+          <pre class="log-entry" style="white-space:pre-wrap;overflow:auto;max-height:150px;">${dataB}</pre>
+        `;
+      } catch (e) {
+        out.innerHTML = `<div class=\"log-entry\">Error: ${e.message}</div>`;
+      }
     };
 
     window.showDataModal = function(node, data) {

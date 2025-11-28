@@ -76,6 +76,89 @@ let replicationQueue = [];
 // Transaction Log
 let transactionLog = [];
 
+// Simple write replication utility (eager, same query forwarded to other nodes)
+async function replicateWrite(sourceNode, query, isolationLevel) {
+  const upper = query.trim().toUpperCase();
+  const isWrite = upper.startsWith('UPDATE') || upper.startsWith('INSERT') || upper.startsWith('DELETE');
+  if (!isWrite) return [];
+  // Fragmentation rule:
+  // node0: all rows
+  // node1: trans newdate < 1997-01-01
+  // node2: trans newdate >= 1997-01-01
+  // For writes originating from node0 replicate ONLY to the correct fragment.
+  // For writes from a fragment replicate back to node0 (and validate the date range).
+  const FRAG_BOUNDARY = new Date('1997-01-01T00:00:00Z');
+
+  // Attempt to extract trans_id for UPDATE/DELETE pattern: WHERE trans_id = <id>
+  let transId = null;
+  const idMatch = /WHERE\s+trans_id\s*=\s*(\d+)/i.exec(query);
+  if (idMatch) {
+    transId = parseInt(idMatch[1], 10);
+  }
+
+  let recordDate = null;
+  if (transId != null) {
+    try {
+      const conn = await pools[sourceNode].getConnection();
+      const [rows] = await conn.query('SELECT newdate FROM trans WHERE trans_id = ?', [transId]);
+      conn.release();
+      if (rows.length) {
+        recordDate = rows[0].newdate instanceof Date ? rows[0].newdate : new Date(rows[0].newdate);
+      }
+    } catch (e) {
+      // ignore date fetch failure, proceed with broad replication
+    }
+  }
+
+  const targets = [];
+  if (sourceNode === 'node0') {
+    if (recordDate) {
+      if (recordDate < FRAG_BOUNDARY) {
+        targets.push('node1');
+      } else {
+        targets.push('node2');
+      }
+    } else {
+      // Fallback if we cannot determine date: replicate to both fragments
+      targets.push('node1', 'node2');
+    }
+  } else {
+    // Writing on a fragment: replicate to master only AFTER validating fragment rule
+    if (recordDate) {
+      const violatesNode1 = sourceNode === 'node1' && recordDate >= FRAG_BOUNDARY;
+      const violatesNode2 = sourceNode === 'node2' && recordDate < FRAG_BOUNDARY;
+      if (violatesNode1 || violatesNode2) {
+        // Push a failed replication entry noting violation
+        const violationEntry = { id: uuidv4(), source: sourceNode, target: 'node0', query, status: 'failed', error: 'Fragment rule violation (date outside fragment range)', time: new Date(), fragmentRouting: { transId, recordDate } };
+        replicationQueue.push(violationEntry);
+        return [violationEntry];
+      }
+    }
+    targets.push('node0');
+  }
+  const results = [];
+  for (const tgt of targets) {
+    if (!pools[tgt]) continue;
+    const entry = { id: uuidv4(), source: sourceNode, target: tgt, query, status: 'pending', time: new Date(), fragmentRouting: { transId, recordDate } };
+    try {
+      const conn = await pools[tgt].getConnection();
+      if (isolationLevel) {
+        const iso = String(isolationLevel).replace(/_/g, ' ');
+        await conn.query(`SET SESSION TRANSACTION ISOLATION LEVEL ${iso}`);
+      }
+      await conn.query(query);
+      conn.release();
+      entry.status = 'replicated';
+    } catch (e) {
+      entry.status = 'failed';
+      entry.error = e.message;
+    }
+    replicationQueue.push(entry);
+    results.push(entry);
+  }
+  return results;
+}
+
 // Initialize connection pools
 async function initializePools() {
   try {
@@ -231,12 +314,16 @@ app.post('/api/query/execute', async (req, res) => {
     logEntry.status = 'committed';
     logEntry.endTime = new Date();
     logEntry.results = results;
+    // Attempt simple replication if write
+    const replicationResults = await replicateWrite(node, query, isolationLevel);
+    logEntry.replication = replicationResults.map(r => ({ target: r.target, status: r.status }));
 
     transactionLog.push(logEntry);
 
     res.json({
       transactionId,
       results,
+      replication: logEntry.replication,
       logEntry
     });
   } catch (error) {

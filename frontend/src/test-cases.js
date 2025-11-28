@@ -32,6 +32,45 @@ export async function case1ConcurrentReads(nodeA, nodeB, recordId, isolationLeve
   }
 }
 
+// Case 2: one write then concurrent reads from writer + 2 readers
+export async function case2WritePlusReads(writerNode, readerA, readerB, recordId, newValue, isolationLevel) {
+  const id = Number(recordId);
+  const val = Number(newValue);
+  const iso = isolationLevel || 'READ_COMMITTED';
+  const updateQuery = `UPDATE trans SET amount = ${val} WHERE trans_id = ${id}`;
+  const selectQuery = `SELECT * FROM trans WHERE trans_id = ${id}`;
+  let writeResult;
+  try {
+    writeResult = await apiClient.post('/query/execute', { node: writerNode, query: updateQuery, isolationLevel: iso });
+  } catch (e) {
+    writeResult = { status: 'failed', error: e.message };
+  }
+  // Concurrent reads
+  const readPromises = [
+    apiClient.post('/query/execute', { node: writerNode, query: selectQuery, isolationLevel: iso }),
+    apiClient.post('/query/execute', { node: readerA, query: selectQuery, isolationLevel: iso }),
+    apiClient.post('/query/execute', { node: readerB, query: selectQuery, isolationLevel: iso })
+  ];
+  const [wRead, aRead, bRead] = await Promise.allSettled(readPromises);
+  const unwrap = r => r.status === 'fulfilled' ? (r.value.data.results || []) : [];
+  const replication = writeResult?.data?.replication || [];
+
+  return {
+    isolation: iso,
+    write: {
+      status: writeResult?.data?.logEntry?.status || writeResult.status || 'unknown',
+      error: writeResult.error,
+      query: updateQuery,
+      replication
+    },
+    reads: {
+      writer: unwrap(wRead),
+      readerA: unwrap(aRead),
+      readerB: unwrap(bRead)
+    }
+  };
+}
+
 export async function retryReplication() {
   // placeholder for future phases
   showSuccessMessage('Retry triggered (to be implemented)');
