@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Distributed Database Simulator</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <h1>🗄️ Distributed Database Simulator</h1>
+      <p>Multi-Node Concurrency Control & Replication Management</p>
+    </header>
+
+    <!-- Notification Area -->
+    <div id="notification" class="notification" style="display: none;"></div>
+
+    <!-- Main Dashboard -->
+    <main class="dashboard">
+      
+      <!-- Left Sidebar: Node Management -->
+      <section class="sidebar">
+        <div class="section-card">
+          <h2>📊 Node Status</h2>
+          
+          <div class="nodes-grid">
+            <div class="node-card master">
+              <div id="status-node0" class="node-status offline">NODE 0: OFFLINE</div>
+              <p class="node-role">Master / Central</p>
+              <p class="node-data">Full Dataset</p>
+              <div class="node-buttons">
+                <button onclick="killNode('node0')" class="btn-small danger">Kill</button>
+                <button onclick="recoverNode('node0')" class="btn-small success">Recover</button>
+                <button onclick="viewData('node0')" class="btn-small info">View Data</button>
+              </div>
+            </div>
+
+            <div class="node-card fragment">
+              <div id="status-node1" class="node-status offline">NODE 1: OFFLINE</div>
+              <p class="node-role">Fragment A</p>
+              <p class="node-data">First Half Rows</p>
+              <div class="node-buttons">
+                <button onclick="killNode('node1')" class="btn-small danger">Kill</button>
+                <button onclick="recoverNode('node1')" class="btn-small success">Recover</button>
+                <button onclick="viewData('node1')" class="btn-small info">View Data</button>
+              </div>
+            </div>
+
+            <div class="node-card fragment">
+              <div id="status-node2" class="node-status offline">NODE 2: OFFLINE</div>
+              <p class="node-role">Fragment B</p>
+              <p class="node-data">Second Half Rows</p>
+              <div class="node-buttons">
+                <button onclick="killNode('node2')" class="btn-small danger">Kill</button>
+                <button onclick="recoverNode('node2')" class="btn-small success">Recover</button>
+                <button onclick="viewData('node2')" class="btn-small info">View Data</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-card">
+          <h2>⚙️ Control Panel</h2>
+          <button onclick="app.initializeApp()" class="btn-full primary">Reinitialize Backend</button>
+          <button onclick="app.startAutoRefresh()" class="btn-full secondary">Start Auto-Refresh</button>
+          <button onclick="app.stopAutoRefresh()" class="btn-full secondary">Stop Auto-Refresh</button>
+          <button onclick="app.clearLogsAction()" class="btn-full danger">Clear All Logs</button>
+        </div>
+      </section>
+
+      <!-- Center: Query Execution -->
+      <section class="main-content">
+        <div class="section-card">
+          <h2>💾 Execute Query</h2>
+          
+          <div class="form-group">
+            <label>Target Node</label>
+            <select id="selectNode" onchange="updateSelectedNode(this.value)">
+              <option value="node0">Node 0 (Master)</option>
+              <option value="node1">Node 1 (Fragment A)</option>
+              <option value="node2">Node 2 (Fragment B)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Isolation Level</label>
+            <select id="isolationLevel" onchange="updateIsolationLevel(this.value)">
+              <option value="READ_UNCOMMITTED">Read Uncommitted</option>
+              <option value="READ_COMMITTED" selected>Read Committed</option>
+              <option value="REPEATABLE_READ">Repeatable Read</option>
+              <option value="SERIALIZABLE">Serializable</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>SQL Query</label>
+            <textarea id="queryInput" placeholder="Enter SQL query here..." rows="6"></textarea>
+          </div>
+
+          <button onclick="executeQuery()" class="btn-full primary">Execute Query</button>
+        </div>
+
+        <!-- Transaction Logs -->
+        <div class="section-card">
+          <h2>📝 Recent Transactions (Last 10)</h2>
+          <div id="transaction-logs" class="logs-container">
+            <div class="log-entry">No transactions yet</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Sidebar: Replication & Status -->
+      <section class="sidebar">
+        <div class="section-card">
+          <h2>🔄 Replication Queue</h2>
+          <div id="replication-queue" class="logs-container">
+            <div class="queue-entry">Queue is empty</div>
+          </div>
+          <button onclick="retryReplication()" class="btn-full success" style="margin-top: 10px;">Retry Replication</button>
+        </div>
+
+        <div class="section-card">
+          <h2>🧪 Test Cases</h2>
+          <button onclick="runTestCase('case1')" class="btn-full info">Case 1: Concurrent Reads</button>
+          <button onclick="runTestCase('case2')" class="btn-full info">Case 2: Write + Reads</button>
+          <button onclick="runTestCase('case3')" class="btn-full info">Case 3: Concurrent Writes</button>
+          <button onclick="runTestCase('failure1')" class="btn-full warning">Failure 1: Replication Fail</button>
+          <button onclick="runTestCase('failure2')" class="btn-full warning">Failure 2: Node0 Recovery</button>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Data Viewer Modal -->
+    <div id="dataModal" class="modal" style="display: none;">
+      <div class="modal-content">
+        <span class="close-button" onclick="closeDataModal()">&times;</span>
+        <h2 id="dataModalTitle">Node Data</h2>
+        <div id="dataTable" class="data-table"></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as app from './src/app.js';
+    
+    // Make app functions globally accessible
+    window.app = app;
+    
+    // Initialize application
+    app.initializeApp();
+
+    // UI Event Handlers
+    window.updateSelectedNode = function(node) {
+      app.setState({ selectedNode: node });
+    };
+
+    window.updateIsolationLevel = function(level) {
+      app.setState({ selectedIsolationLevel: level });
+    };
+
+    window.executeQuery = async function() {
+      const queryInput = document.getElementById('queryInput');
+      const query = queryInput.value;
+      await app.executeQueryAction(query);
+      queryInput.value = '';
+    };
+
+    window.killNode = async function(node) {
+      if (confirm(`Are you sure you want to kill ${node}?`)) {
+        await app.killNodeAction(node);
+      }
+    };
+
+    window.recoverNode = async function(node) {
+      await app.recoverNodeAction(node);
+    };
+
+    window.viewData = async function(node) {
+      const data = await app.viewNodeData(node);
+      if (data) {
+        showDataModal(node, data);
+      }
+    };
+
+    window.retryReplication = function() {
+      alert('Retry Replication functionality will be implemented in the next phase');
+    };
+
+    window.runTestCase = function(caseId) {
+      alert(`Test case ${caseId} will be implemented in the next phase`);
+    };
+
+    window.showDataModal = function(node, data) {
+      const modal = document.getElementById('dataModal');
+      const title = document.getElementById('dataModalTitle');
+      const tableDiv = document.getElementById('dataTable');
+      
+      title.textContent = `${node.toUpperCase()} - ${data.count} rows`;
+      
+      let tableHTML = '<table class="data-table"><tr>';
+      
+      // Add headers
+      if (data.data && data.data.length > 0) {
+        const firstRow = data.data[0];
+        Object.keys(firstRow).forEach(key => {
+          tableHTML += `<th>${key}</th>`;
+        });
+        tableHTML += '</tr>';
+        
+        // Add rows
+        data.data.forEach(row => {
+          tableHTML += '<tr>';
+          Object.values(row).forEach(value => {
+            tableHTML += `<td>${value}</td>`;
+          });
+          tableHTML += '</tr>';
+        });
+      }
+      
+      tableHTML += '</table>';
+      tableDiv.innerHTML = tableHTML;
+      modal.style.display = 'block';
+    };
+
+    window.closeDataModal = function() {
+      document.getElementById('dataModal').style.display = 'none';
+    };
+  </script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  # Backend service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - DB_HOST_NODE0=${DB_HOST_NODE0}
+      - DB_PORT_NODE0=${DB_PORT_NODE0}
+      - DB_USER_NODE0=${DB_USER_NODE0}
+      - DB_PASSWORD_NODE0=${DB_PASSWORD_NODE0}
+      - DB_HOST_NODE1=${DB_HOST_NODE1}
+      - DB_PORT_NODE1=${DB_PORT_NODE1}
+      - DB_USER_NODE1=${DB_USER_NODE1}
+      - DB_PASSWORD_NODE1=${DB_PASSWORD_NODE1}
+      - DB_HOST_NODE2=${DB_HOST_NODE2}
+      - DB_PORT_NODE2=${DB_PORT_NODE2}
+      - DB_USER_NODE2=${DB_USER_NODE2}
+      - DB_PASSWORD_NODE2=${DB_PASSWORD_NODE2}
+      - DB_NAME=${DB_NAME}
+      - PORT=5000
+    depends_on:
+      - db_node0
+      - db_node1
+      - db_node2
+    networks:
+      - distributed-db-network
+
+  # Frontend service (optional - usually deployed separately)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://backend:5000/api
+    depends_on:
+      - backend
+    networks:
+      - distributed-db-network
+
+  # MySQL Node 0 (Master)
+  db_node0:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD_NODE0}
+      MYSQL_DATABASE: ${DB_NAME}
+    volumes:
+      - db_node0_data:/var/lib/mysql
+    networks:
+      - distributed-db-network
+
+  # MySQL Node 1 (Fragment A)
+  db_node1:
+    image: mysql:8.0
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD_NODE1}
+      MYSQL_DATABASE: ${DB_NAME}
+    volumes:
+      - db_node1_data:/var/lib/mysql
+    networks:
+      - distributed-db-network
+
+  # MySQL Node 2 (Fragment B)
+  db_node2:
+    image: mysql:8.0
+    ports:
+      - "3308:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD_NODE2}
+      MYSQL_DATABASE: ${DB_NAME}
+    volumes:
+      - db_node2_data:/var/lib/mysql
+    networks:
+      - distributed-db-network
+
+volumes:
+  db_node0_data:
+  db_node1_data:
+  db_node2_data:
+
+networks:
+  distributed-db-network:
+    driver: bridge
