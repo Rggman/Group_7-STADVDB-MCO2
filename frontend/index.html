@@ -138,6 +138,27 @@
       <div class="modal-content">
         <span class="close-button" onclick="closeDataModal()">&times;</span>
         <h2 id="dataModalTitle">Node Data</h2>
+        
+        <!-- Filter Controls -->
+        <div class="form-group" style="display: flex; gap: 10px; margin-bottom: 15px; align-items: center;">
+          <label style="min-width: 80px;">Filter:</label>
+          <select id="dataFilter" onchange="refreshDataWithFilter()" style="flex: 1;">
+            <option value="all">All Records (50 latest)</option>
+            <option value="recent_updates">Recently Updated</option>
+            <option value="by_trans_id">Specific Trans ID</option>
+            <option value="pre_1997">Pre-1997 Records</option>
+            <option value="post_1997">Post-1997 Records</option>
+            <option value="high_balance">High Balance (>5000)</option>
+          </select>
+          
+          <input id="transIdInput" type="number" placeholder="Trans ID" style="width: 100px; display: none;" onkeypress="if(event.key==='Enter') refreshDataWithFilter()">
+          
+          <button onclick="refreshDataWithFilter()" class="btn-small primary">Refresh</button>
+        </div>
+        
+        <!-- Status Info -->
+        <div id="dataStatus" style="margin-bottom: 10px; font-size: 14px; color: #888;"></div>
+        
         <div id="dataTable" class="data-table"></div>
       </div>
     </div>
@@ -456,12 +477,37 @@
       }
     };
 
+    // Store current modal data globally for filtering
+    window.currentModalNode = null;
+    window.currentModalData = null;
+
     window.showDataModal = function(node, data) {
       const modal = document.getElementById('dataModal');
       const title = document.getElementById('dataModalTitle');
       const tableDiv = document.getElementById('dataTable');
+      const statusDiv = document.getElementById('dataStatus');
+      const filterSelect = document.getElementById('dataFilter');
+      const transIdInput = document.getElementById('transIdInput');
       
-      title.textContent = `${node.toUpperCase()} - ${data.count} rows`;
+      // Store for filtering
+      window.currentModalNode = node;
+      window.currentModalData = data;
+      
+      // Reset filter to 'all' when opening unless it's a refresh
+      if (!data.filter || data.filter === 'all') {
+        filterSelect.value = 'all';
+        transIdInput.style.display = 'none';
+      } else {
+        filterSelect.value = data.filter;
+        transIdInput.style.display = data.filter === 'by_trans_id' ? 'block' : 'none';
+      }
+      
+      title.textContent = `${node.toUpperCase()} - Data Viewer`;
+      
+      // Update status info
+      const statusText = `${data.count} rows | Filter: ${data.filter || 'all'} | Node: ${node}`;
+      const recentInfo = data.recent_updates_available ? ' | 🔄 Recent updates available' : '';
+      statusDiv.innerHTML = statusText + recentInfo;
       
       let tableHTML = '<table class="data-table"><tr>';
       
@@ -469,18 +515,28 @@
       if (data.data && data.data.length > 0) {
         const firstRow = data.data[0];
         Object.keys(firstRow).forEach(key => {
-          tableHTML += `<th>${key}</th>`;
+          if (key !== 'recently_updated') { // Hide internal flag
+            tableHTML += `<th>${key}</th>`;
+          }
         });
         tableHTML += '</tr>';
         
-        // Add rows
+        // Add rows with highlighting for recent updates
         data.data.forEach(row => {
-          tableHTML += '<tr>';
-          Object.values(row).forEach(value => {
-            tableHTML += `<td>${value}</td>`;
+          const isRecentlyUpdated = row.recently_updated;
+          const rowClass = isRecentlyUpdated ? ' class="recently-updated"' : '';
+          const title = isRecentlyUpdated ? ' title="Recently updated record"' : '';
+          
+          tableHTML += `<tr${rowClass}${title}>`;
+          Object.entries(row).forEach(([key, value]) => {
+            if (key !== 'recently_updated') { // Hide internal flag
+              tableHTML += `<td>${value}</td>`;
+            }
           });
           tableHTML += '</tr>';
         });
+      } else {
+        tableHTML += '<tr><td colspan="100%" style="text-align: center; color: #888;">No data found</td></tr>';
       }
       
       tableHTML += '</table>';
@@ -491,6 +547,50 @@
     window.closeDataModal = function() {
       document.getElementById('dataModal').style.display = 'none';
     };
+    
+    // Function to refresh data with current filter
+    window.refreshDataWithFilter = async function() {
+      if (!window.currentModalNode) return;
+      
+      const filterSelect = document.getElementById('dataFilter');
+      const transIdInput = document.getElementById('transIdInput');
+      const filter = filterSelect.value;
+      
+      // Show/hide trans ID input based on filter
+      transIdInput.style.display = filter === 'by_trans_id' ? 'block' : 'none';
+      
+      try {
+        // Build query parameters
+        let queryParams = `?filter=${filter}`;
+        if (filter === 'by_trans_id' && transIdInput.value) {
+          queryParams += `&trans_id=${transIdInput.value}`;
+        }
+        
+        // Fetch filtered data
+        const response = await fetch(`http://localhost:5000/api/data/${window.currentModalNode}${queryParams}`);
+        const data = await response.json();
+        
+        // Update modal with new data
+        window.showDataModal(window.currentModalNode, data);
+        
+      } catch (error) {
+        console.error('Error refreshing data:', error);
+        const statusDiv = document.getElementById('dataStatus');
+        statusDiv.innerHTML = `<span style="color: red;">Error: ${error.message}</span>`;
+      }
+    };
+    
+    // Handle filter change to show/hide trans ID input
+    document.addEventListener('DOMContentLoaded', function() {
+      const filterSelect = document.getElementById('dataFilter');
+      const transIdInput = document.getElementById('transIdInput');
+      
+      if (filterSelect) {
+        filterSelect.addEventListener('change', function() {
+          transIdInput.style.display = this.value === 'by_trans_id' ? 'block' : 'none';
+        });
+      }
+    });
   </script>
 </body>
 </html>

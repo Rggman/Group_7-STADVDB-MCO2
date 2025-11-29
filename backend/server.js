@@ -70,6 +70,13 @@ let nodeStatus = {
   node2: { status: 'offline', lastCheck: null }
 };
 
+// Simulated Node Failures (to override actual connectivity)
+let simulatedFailures = {
+  node0: false,
+  node1: false,
+  node2: false
+};
+
 // Replication Queue
 let replicationQueue = [];
 
@@ -176,6 +183,11 @@ async function replicateWrite(sourceNode, query, isolationLevel) {
     if (!pools[tgt]) continue;
     const entry = { id: uuidv4(), source: sourceNode, target: tgt, query, status: 'pending', time: new Date(), fragmentRouting: { transId, recordDate } };
     try {
+      // Check if target node is in simulated failure state
+      if (simulatedFailures[tgt]) {
+        throw new Error(`Node ${tgt} is offline (simulated failure)`);
+      }
+      
       const conn = await pools[tgt].getConnection();
       if (isolationLevel) {
         const iso = String(isolationLevel).replace(/_/g, ' ');
@@ -247,6 +259,17 @@ async function checkNodeHealth() {
   const nodes = ['node0', 'node1', 'node2'];
   
   for (const node of nodes) {
+    // If node is simulating failure, don't check actual connectivity
+    if (simulatedFailures[node]) {
+      nodeStatus[node] = { 
+        status: 'offline', 
+        lastCheck: new Date(), 
+        error: 'Simulated node failure',
+        failureTime: nodeStatus[node].failureTime || new Date()
+      };
+      continue;
+    }
+
     try {
       const connection = await pools[node].getConnection();
       await connection.query('SELECT 1');
@@ -419,12 +442,16 @@ app.post('/api/nodes/kill', (req, res) => {
   const { node } = req.body;
   
   if (nodeStatus[node]) {
+    // Mark node for simulated failure
+    simulatedFailures[node] = true;
     nodeStatus[node].status = 'offline';
     nodeStatus[node].failureTime = new Date();
     
+    console.log(`🔴 KILLING NODE: ${node} - Simulated failure activated`);
+    
     res.json({
-      message: `${node} has been marked as offline`,
-      nodeStatus
+      message: `${node} has been killed (simulated failure)`,
+      nodeStatus: nodeStatus[node]
     });
   } else {
     res.status(400).json({ error: 'Invalid node' });
@@ -437,10 +464,17 @@ app.post('/api/nodes/recover', async (req, res) => {
   
   try {
     if (nodeStatus[node]) {
+      // Remove simulated failure flag
+      simulatedFailures[node] = false;
+      delete nodeStatus[node].failureTime;
+      
+      console.log(`🟢 RECOVERING NODE: ${node} - Simulated failure removed`);
+      
+      // Check health after removing failure simulation
       await checkNodeHealth();
       
       res.json({
-        message: `${node} recovery initiated`,
+        message: `${node} recovery completed`,
         nodeStatus: nodeStatus[node]
       });
     } else {
@@ -451,12 +485,18 @@ app.post('/api/nodes/recover', async (req, res) => {
   }
 });
 
-// 9. Get All Data from a Node (first 50 rows)
+// 9. Get All Data from a Node with filtering support
 app.get('/api/data/:node', async (req, res) => {
   const { node } = req.params;
-  const table = req.query.table || 'trans';
+  const { 
+    table = 'trans', 
+    filter = 'all',
+    trans_id,
+    limit = 50,
+    updated_since
+  } = req.query;
 
-  console.log(`\n📊 [DATA REQUEST] Node: ${node}, Table: ${table}`);
+  console.log(`\n📊 [DATA REQUEST] Node: ${node}, Table: ${table}, Filter: ${filter}`);
 
   if (!pools[node]) {
     console.error(`❌ Invalid node: ${node}`);
@@ -468,28 +508,79 @@ app.get('/api/data/:node', async (req, res) => {
     const connection = await pools[node].getConnection();
     console.log(`✅ Connection obtained`);
     
-    // Query with date formatting and ordering
-    console.log(`🔍 Querying: SELECT * FROM ${table} ORDER BY newdate ASC LIMIT 50`);
-    const [results] = await connection.query(`
+    let baseQuery = `
       SELECT 
         trans_id, 
         account_id, 
-        DATE_FORMAT(newdate, '%Y-%m-%d') as newdate, 
+        DATE_FORMAT(newdate, '%Y-%m-%d %H:%i:%s') as newdate, 
         amount, 
         balance 
       FROM ?? 
-      ORDER BY newdate ASC 
-      LIMIT 50
-    `, [table]);
+    `;
+    let whereClause = '';
+    let orderClause = 'ORDER BY newdate ASC';
+    let params = [table];
+
+    // Build query based on filter type
+    switch (filter) {
+      case 'recent_updates':
+        // Get recently modified records (last 10 minutes worth of trans_ids from transaction log)
+        const recentTransIds = getRecentlyUpdatedTransIds();
+        if (recentTransIds.length > 0) {
+          const placeholders = recentTransIds.map(() => '?').join(',');
+          whereClause = `WHERE trans_id IN (${placeholders})`;
+          params.push(...recentTransIds);
+          orderClause = 'ORDER BY trans_id ASC';
+        }
+        break;
+      
+      case 'by_trans_id':
+        if (trans_id) {
+          whereClause = 'WHERE trans_id = ?';
+          params.push(parseInt(trans_id));
+        }
+        break;
+        
+      case 'pre_1997':
+        whereClause = "WHERE newdate < '1997-01-01'";
+        break;
+        
+      case 'post_1997':
+        whereClause = "WHERE newdate >= '1997-01-01'";
+        break;
+        
+      case 'high_balance':
+        whereClause = 'WHERE balance > 5000';
+        orderClause = 'ORDER BY balance DESC';
+        break;
+        
+      default: // 'all'
+        // No additional filtering
+        break;
+    }
+    
+    const finalQuery = `${baseQuery} ${whereClause} ${orderClause} LIMIT ${parseInt(limit)}`;
+    console.log(`🔍 Querying: ${finalQuery}`);
+    
+    const [results] = await connection.query(finalQuery, params);
     connection.release();
 
     console.log(`✅ Query successful. Results: ${results.length} rows`);
 
+    // Mark recently updated records for highlighting
+    const recentTransIds = getRecentlyUpdatedTransIds();
+    const enhancedResults = results.map(row => ({
+      ...row,
+      recently_updated: recentTransIds.includes(row.trans_id)
+    }));
+
     res.json({
       node,
       table,
-      count: results.length,
-      data: results
+      filter,
+      count: enhancedResults.length,
+      data: enhancedResults,
+      recent_updates_available: recentTransIds.length > 0
     });
   } catch (error) {
     console.error(`❌ Error fetching data from ${node}:`, error.message);
@@ -497,6 +588,24 @@ app.get('/api/data/:node', async (req, res) => {
     res.status(500).json({ error: error.message, details: error.sqlMessage || 'Unknown error' });
   }
 });
+
+// Helper function to get recently updated trans_ids from transaction log
+function getRecentlyUpdatedTransIds() {
+  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+  const recentTransIds = [];
+  
+  // Extract trans_ids from recent write operations in transaction log
+  transactionLog.forEach(log => {
+    if (log.endTime && log.endTime > tenMinutesAgo && isWriteQuery(log.query)) {
+      const transId = parseTransId(log.query);
+      if (transId && !recentTransIds.includes(transId)) {
+        recentTransIds.push(transId);
+      }
+    }
+  });
+  
+  return recentTransIds;
+}
 
 // 10. Clear Logs (for testing)
 app.post('/api/logs/clear', (req, res) => {

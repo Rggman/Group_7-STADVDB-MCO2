@@ -247,16 +247,49 @@ function updateReplicationQueueUI() {
   if (queueContainer) {
     queueContainer.innerHTML = '';
     
-    state.replicationQueue.forEach(item => {
-      const queueElement = document.createElement('div');
-      queueElement.className = 'queue-entry';
-      queueElement.textContent = `Pending: ${item.operation} on ${item.node}`;
-      queueContainer.appendChild(queueElement);
-    });
-    
     if (state.replicationQueue.length === 0) {
       queueContainer.innerHTML = '<div class="queue-entry">Queue is empty</div>';
+      return;
     }
+    
+    // Show most recent entries first
+    const recentQueue = state.replicationQueue.slice(-10).reverse();
+    
+    recentQueue.forEach(item => {
+      const queueElement = document.createElement('div');
+      
+      // Determine status class for styling
+      let statusClass = '';
+      let statusText = item.status || 'pending';
+      
+      switch (statusText) {
+        case 'replicated':
+          statusClass = 'success';
+          break;
+        case 'failed':
+          statusClass = 'error';
+          break;
+        default:
+          statusClass = 'pending';
+      }
+      
+      queueElement.className = `queue-entry ${statusClass}`;
+      
+      // Format the display text
+      const sourceNode = item.source || 'unknown';
+      const targetNode = item.target || 'unknown';
+      const operation = item.query ? item.query.split(' ')[0] : 'QUERY';
+      const time = item.time ? new Date(item.time).toLocaleTimeString() : '';
+      
+      queueElement.innerHTML = `
+        <div class="queue-status">${statusText.toUpperCase()}</div>
+        <div class="queue-details">${sourceNode} → ${targetNode} | ${operation}</div>
+        ${item.error ? `<div class="queue-error">Error: ${item.error}</div>` : ''}
+        <div class="queue-time">${time}</div>
+      `;
+      
+      queueContainer.appendChild(queueElement);
+    });
   }
 }
 
