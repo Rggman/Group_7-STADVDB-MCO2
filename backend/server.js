@@ -138,6 +138,17 @@ async function replicateWrite(sourceNode, query, isolationLevel) {
     transId = parseInt(idMatch[1], 10);
   }
 
+  // Enhanced: Also check for date-based WHERE clauses
+  let targetFragment = null;
+  const dateQuery = query.toLowerCase();
+  
+  // Check for newdate conditions in the query
+  if (dateQuery.includes('newdate >= \'1997-01-01\'') || dateQuery.includes('newdate >= "1997-01-01"')) {
+    targetFragment = 'node2'; // Post-1997 data goes to node2
+  } else if (dateQuery.includes('newdate < \'1997-01-01\'') || dateQuery.includes('newdate < "1997-01-01"')) {
+    targetFragment = 'node1'; // Pre-1997 data goes to node1
+  }
+
   let recordDate = null;
   if (transId != null) {
     try {
@@ -160,9 +171,14 @@ async function replicateWrite(sourceNode, query, isolationLevel) {
       } else {
         targets.push('node2');
       }
+    } else if (targetFragment) {
+      // Use detected fragment from date-based WHERE clause
+      targets.push(targetFragment);
+      console.log(`🎯 Detected target fragment: ${targetFragment} from query: ${query.substring(0, 100)}...`);
     } else {
       // Fallback if we cannot determine date: replicate to both fragments
       targets.push('node1', 'node2');
+      console.log(`⚠️ Cannot determine target fragment, replicating to both fragments`);
     }
   } else {
     // Writing on a fragment: replicate to master only AFTER validating fragment rule
@@ -473,9 +489,13 @@ app.post('/api/nodes/recover', async (req, res) => {
       // Check health after removing failure simulation
       await checkNodeHealth();
       
+      // Replay missed transactions
+      const replayResults = await replayMissedTransactions(node);
+      
       res.json({
         message: `${node} recovery completed`,
-        nodeStatus: nodeStatus[node]
+        nodeStatus: nodeStatus[node],
+        replayResults: replayResults
       });
     } else {
       res.status(400).json({ error: 'Invalid node' });
@@ -484,6 +504,70 @@ app.post('/api/nodes/recover', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// Replay missed transactions for recovered node
+async function replayMissedTransactions(recoveredNode) {
+  console.log(`🔄 Replaying missed transactions for ${recoveredNode}...`);
+  
+  // Find failed replications targeting this node
+  const missedTransactions = replicationQueue.filter(entry => 
+    entry.target === recoveredNode && entry.status === 'failed'
+  );
+  
+  console.log(`📊 Found ${missedTransactions.length} missed transactions for ${recoveredNode}:`);
+  missedTransactions.forEach((tx, index) => {
+    console.log(`  ${index + 1}. ${tx.source} → ${tx.target}: ${tx.query.substring(0, 60)}...`);
+  });
+  
+  if (missedTransactions.length === 0) {
+    console.log(`✅ No missed transactions for ${recoveredNode}`);
+    return { replayed: 0, failed: 0 };
+  }
+  
+  let replayed = 0;
+  let failed = 0;
+  
+  for (const transaction of missedTransactions) {
+    try {
+      console.log(`🔄 Replaying: ${transaction.query} on ${recoveredNode}`);
+      
+      // Execute the missed transaction on the recovered node
+      const connection = await pools[recoveredNode].getConnection();
+      await connection.query('SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED');
+      
+      const [result] = await connection.query(transaction.query);
+      
+      connection.release();
+      
+      // Mark as successfully replayed
+      transaction.status = 'replayed';
+      transaction.replayTime = new Date();
+      
+      replayed++;
+      console.log(`✅ Successfully replayed transaction ${transaction.id}`);
+      
+    } catch (error) {
+      console.error(`❌ Failed to replay transaction ${transaction.id}:`, error.message);
+      transaction.replayError = error.message;
+      failed++;
+    }
+  }
+  
+  console.log(`🎯 Replay complete: ${replayed} successful, ${failed} failed`);
+  
+  return { 
+    replayed, 
+    failed, 
+    totalMissed: missedTransactions.length,
+    transactions: missedTransactions.map(t => ({
+      id: t.id,
+      query: t.query,
+      status: t.status,
+      originalError: t.error,
+      replayError: t.replayError || null
+    }))
+  };
+}
 
 // 9. Get All Data from a Node with filtering support
 app.get('/api/data/:node', async (req, res) => {
