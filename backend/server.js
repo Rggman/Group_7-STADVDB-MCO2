@@ -292,6 +292,63 @@ async function replicateWrite(sourceNode, query) {
   return results;
 }
 
+/**
+ * Replay failed replications to a recovered node
+ * @param {string} recoveredNode - The node that has been recovered (e.g., 'node0')
+ * @returns {Object} Summary of replay results
+ */
+async function replayFailedReplications(recoveredNode) {
+  const failedReplications = replicationQueue.filter(
+    entry => entry.target === recoveredNode && entry.status === 'failed'
+  );
+  
+  console.log(`[RECOVERY] Found ${failedReplications.length} failed replications for ${recoveredNode}`);
+  
+  const results = {
+    total: failedReplications.length,
+    success: 0,
+    failed: 0,
+    details: []
+  };
+  
+  for (const entry of failedReplications) {
+    try {
+      console.log(`[RECOVERY] Replaying: ${entry.source} → ${entry.target} | ${entry.query.substring(0, 50)}...`);
+      
+      const conn = await pools[recoveredNode].getConnection();
+      await conn.query(entry.query);
+      conn.release();
+      
+      // Update entry status
+      entry.status = 'replicated';
+      entry.recoveryTime = new Date();
+      entry.error = undefined;
+      
+      results.success++;
+      results.details.push({
+        id: entry.id,
+        query: entry.query.substring(0, 100),
+        status: 'success'
+      });
+      
+      console.log(`[RECOVERY] ✓ Successfully replayed transaction ${entry.id}`);
+    } catch (error) {
+      results.failed++;
+      results.details.push({
+        id: entry.id,
+        query: entry.query.substring(0, 100),
+        status: 'failed',
+        error: error.message
+      });
+      
+      console.log(`[RECOVERY] ✗ Failed to replay transaction ${entry.id}: ${error.message}`);
+    }
+  }
+  
+  console.log(`[RECOVERY] Summary: ${results.success} succeeded, ${results.failed} failed out of ${results.total} total`);
+  return results;
+}
+
 // Initialize connection pools
 async function initializePools() {
   try {
@@ -545,14 +602,20 @@ app.post('/api/nodes/recover', async (req, res) => {
       simulatedFailures[node] = false;
       delete nodeStatus[node].failureTime;
       
-      console.log(`[RECOVERY] RECOVERING NODE: ${node} - Simulated failure removed`);
+      console.log(`[RECOVERY] RECOVERING NODE: ${node} - Processing missed transactions...`);
+      
+      // Process failed replications for this recovered node
+      const replayResults = await replayFailedReplications(node);
       
       // Check health after removing failure simulation
       await checkNodeHealth();
       
       res.json({
         message: `${node} recovery completed`,
-        nodeStatus: nodeStatus[node]
+        nodeStatus: nodeStatus[node],
+        replayedTransactions: replayResults.success,
+        failedReplays: replayResults.failed,
+        totalProcessed: replayResults.total
       });
     } else {
       res.status(400).json({ error: 'Invalid node' });
