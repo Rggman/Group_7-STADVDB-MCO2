@@ -103,13 +103,24 @@ let replicationQueue = [];
 // Transaction Log
 let transactionLog = [];
 
-// Database-level Distributed Lock Manager using MySQL GET_LOCK()
-// Locks are propagated to target nodes during replication
-const LOCK_TIMEOUT = 10; // seconds to wait for lock acquisition
+// ============================================================================
+// CUSTOM APPLICATION-LEVEL LOCK MANAGER (NOT using MySQL built-in locking)
+// ============================================================================
 
+// =============================================================================
+// SIMPLE CONCURRENCY CONTROL - ISOLATION LEVELS
+// =============================================================================
+
+// Track active (uncommitted) transactions globally
+let activeTransactions = {};
+// { "trans_123": { node: "node0", startTime: timestamp } }
+
+const TRANSACTION_TIMEOUT = 5000; // 5 seconds
+
+// Helper functions
 function parseTransId(query) {
-  const m = /WHERE\s+trans_id\s*=\s*(\d+)/i.exec(query || '');
-  return m ? parseInt(m[1], 10) : null;
+  const match = /WHERE\s+trans_id\s*=\s*(\d+)/i.exec(query || '');
+  return match ? parseInt(match[1], 10) : null;
 }
 
 function isWriteQuery(query) {
@@ -118,179 +129,89 @@ function isWriteQuery(query) {
 }
 
 /**
- * Acquire a database-level lock using MySQL GET_LOCK()
- * @param {object} connection - MySQL connection object
- * @param {number} transId - Transaction ID to lock
- * @param {string} ownerNode - Node requesting the lock
- * @returns {Promise<{ok: boolean, error?: string}>}
+ * Check if read can proceed based on isolation level
+ * Simple rule: If transaction is active, wait (except READ_UNCOMMITTED)
  */
-async function acquireLock(connection, transId, ownerNode) {
-  if (transId == null) return { ok: true };
-  
-  const lockName = `trans_lock_${transId}`;
-  
-  try {
-    const [result] = await connection.query(
-      'SELECT GET_LOCK(?, ?) as lock_result',
-      [lockName, LOCK_TIMEOUT]
-    );
-    
-    if (result[0].lock_result === 1) {
-      console.log(`Lock acquired: ${lockName} by ${ownerNode}`);
-      return { ok: true };
-    } else if (result[0].lock_result === 0) {
-      return { ok: false, error: `Timeout waiting for lock on trans_id ${transId}` };
-    } else {
-      return { ok: false, error: `Failed to acquire lock on trans_id ${transId}` };
-    }
-  } catch (error) {
-    return { ok: false, error: `Lock acquisition error: ${error.message}` };
+async function canReadProceed(transId, isolationLevel) {
+  if (!transId || !activeTransactions[transId]) {
+    return true; // No active transaction, proceed
   }
+  
+  // READ_UNCOMMITTED: Always proceed (dirty reads allowed)
+  if (isolationLevel === 'READ_UNCOMMITTED') {
+    console.log(`[READ_UNCOMMITTED] Dirty read allowed on trans_id=${transId}`);
+    return true;
+  }
+  
+  // All other levels: Wait for transaction to commit
+  console.log(`[${isolationLevel}] Waiting for trans_id=${transId} to commit...`);
+  const startWait = Date.now();
+  
+  while (activeTransactions[transId]) {
+    if (Date.now() - startWait > TRANSACTION_TIMEOUT) {
+      throw new Error(`${isolationLevel}: Timeout waiting for transaction`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  
+  console.log(`[${isolationLevel}] Transaction committed, proceeding with read`);
+  return true;
 }
 
 /**
- * Release a database-level lock using MySQL RELEASE_LOCK()
- * @param {object} connection - MySQL connection object
- * @param {number} transId - Transaction ID to unlock
- * @param {string} ownerNode - Node releasing the lock
+ * Start a transaction (mark as active)
+ * If transaction already active, wait for it to complete (prevents concurrent writes)
  */
-async function releaseLock(connection, transId, ownerNode) {
-  if (transId == null) return;
-  
-  const lockName = `trans_lock_${transId}`;
-  
-  try {
-    const [result] = await connection.query(
-      'SELECT RELEASE_LOCK(?) as release_result',
-      [lockName]
-    );
-    
-    if (result[0].release_result === 1) {
-      console.log(`Lock released: ${lockName} by ${ownerNode}`);
-    }
-  } catch (error) {
-    console.error(`Error releasing lock ${lockName}:`, error.message);
-  }
-}
-
-/**
- * Acquire locks on target nodes before replication
- * @param {Array<string>} targetNodes - Array of node names to lock
- * @param {number} transId - Transaction ID to lock
- * @param {string} sourceNode - Source node requesting locks
- * @returns {Promise<{success: boolean, lockedNodes: Array, errors: Array}>}
- */
-async function acquireDistributedLocks(targetNodes, transId, sourceNode) {
-  if (!transId) return { success: true, lockedNodes: [], errors: [] };
-  
-  const lockedNodes = [];
-  const errors = [];
-  
-  for (const targetNode of targetNodes) {
-    if (!pools[targetNode] || simulatedFailures[targetNode]) {
-      errors.push({ node: targetNode, error: 'Node unavailable' });
-      continue;
-    }
-    
-    try {
-      const conn = await pools[targetNode].getConnection();
-      const lockResult = await acquireLock(conn, transId, sourceNode);
-      conn.release();
-      
-      if (lockResult.ok) {
-        lockedNodes.push(targetNode);
-        console.log(`Distributed lock acquired on ${targetNode} for trans_id=${transId}`);
-      } else {
-        errors.push({ node: targetNode, error: lockResult.error });
-      }
-    } catch (error) {
-      errors.push({ node: targetNode, error: error.message });
-    }
-  }
-  
-  return {
-    success: lockedNodes.length === targetNodes.length,
-    lockedNodes,
-    errors
-  };
-}
-
-/**
- * Release locks on target nodes after replication completes
- * @param {Array<string>} targetNodes - Array of node names to unlock
- * @param {number} transId - Transaction ID to unlock
- * @param {string} sourceNode - Source node releasing locks
- */
-async function releaseDistributedLocks(targetNodes, transId, sourceNode) {
+async function startTransaction(transId, node) {
   if (!transId) return;
   
-  for (const targetNode of targetNodes) {
-    if (!pools[targetNode] || simulatedFailures[targetNode]) continue;
+  // Wait if same transaction is already active (prevents concurrent writes to same record)
+  if (activeTransactions[transId]) {
+    console.log(`[TXN WAIT] trans_id=${transId} already active on ${activeTransactions[transId].node}, waiting...`);
+    const startWait = Date.now();
     
-    try {
-      const conn = await pools[targetNode].getConnection();
-      await releaseLock(conn, transId, sourceNode);
-      conn.release();
-      console.log(`Distributed lock released on ${targetNode} for trans_id=${transId}`);
-    } catch (error) {
-      console.error(`Error releasing distributed lock on ${targetNode}:`, error.message);
+    while (activeTransactions[transId]) {
+      if (Date.now() - startWait > TRANSACTION_TIMEOUT) {
+        throw new Error(`Transaction ${transId}: Timeout waiting for concurrent write to complete`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
+    
+    console.log(`[TXN WAIT] trans_id=${transId} completed, proceeding...`);
+  }
+  
+  // Mark transaction as active
+  activeTransactions[transId] = { node, startTime: Date.now() };
+  console.log(`[TXN START] trans_id=${transId} on ${node}`);
+}
+
+/**
+ * Commit a transaction (mark as committed/remove from active)
+ */
+function commitTransaction(transId) {
+  if (transId && activeTransactions[transId]) {
+    delete activeTransactions[transId];
+    console.log(`[TXN COMMIT] trans_id=${transId}`);
   }
 }
 
 // Simple write replication utility (eager, same query forwarded to other nodes)
-async function replicateWrite(sourceNode, query, isolationLevel) {
+/**
+ * Simple replication: forward write query to appropriate nodes
+ * No locking needed - just execute the query
+ */
+async function replicateWrite(sourceNode, query) {
   const upper = query.trim().toUpperCase();
-  const isWrite = upper.startsWith('UPDATE') || upper.startsWith('INSERT') || upper.startsWith('DELETE');
-  if (!isWrite) return [];
-  // Fragmentation rule:
-  // node0: all rows
-  // node1: trans trans_date < 1997-01-01
-  // node2: trans trans_date >= 1997-01-01
-  // For writes originating from node0 replicate ONLY to the correct fragment.
-  // For writes from a fragment replicate back to node0 (and validate the date range).
+  if (!upper.startsWith('UPDATE') && !upper.startsWith('INSERT') && !upper.startsWith('DELETE')) {
+    return [];
+  }
+
   const FRAG_BOUNDARY = new Date('1997-01-01T00:00:00Z');
-
-  // Attempt to extract trans_id 
-  let transId = null;
-  
-  // For INSERT: extract from VALUES clause - first number after VALUES (
-  if (upper.startsWith('INSERT')) {
-    const insertIdMatch = /VALUES\s*\(\s*(\d+)/i.exec(query);
-    if (insertIdMatch) {
-      transId = parseInt(insertIdMatch[1], 10);
-      console.log(`[INSERT] Extracted trans_id: ${transId}`);
-    }
-  }
-  // For UPDATE/DELETE: extract from WHERE clause
-  else {
-    const idMatch = /WHERE\s+trans_id\s*=\s*(\d+)/i.exec(query);
-    if (idMatch) {
-      transId = parseInt(idMatch[1], 10);
-    }
-  }
-
+  const transId = parseTransId(query);
   let recordDate = null;
-  
-  // For INSERT, extract date from the query itself
-  if (upper.startsWith('INSERT')) {
-    // Try multiple patterns to extract date from INSERT statement
-    // Pattern 1: Find date in VALUES clause (most reliable for our INSERT format)
-    const valuesMatch = /VALUES\s*\([^)]*'(\d{4}-\d{2}-\d{2})'[^)]*\)/i.exec(query);
-    if (valuesMatch) {
-      recordDate = new Date(valuesMatch[1]);
-      console.log(`[INSERT] Extracted date: ${valuesMatch[1]} => ${recordDate}`);
-    } else {
-      // Pattern 2: Find any date-like string after newdate/trans_date column
-      const dateMatch = /(?:trans_date|newdate)[^']*'([^']+)'/i.exec(query);
-      if (dateMatch) {
-        recordDate = new Date(dateMatch[1]);
-        console.log(`[INSERT] Extracted date (fallback): ${dateMatch[1]} => ${recordDate}`);
-      }
-    }
-  }
-  // For UPDATE/DELETE, fetch date from database
-  else if (transId != null) {
+
+  // Get record date to determine target node
+  if (transId) {
     try {
       const conn = await pools[sourceNode].getConnection();
       const [rows] = await conn.query('SELECT newdate FROM trans WHERE trans_id = ?', [transId]);
@@ -299,104 +220,59 @@ async function replicateWrite(sourceNode, query, isolationLevel) {
         recordDate = rows[0].newdate instanceof Date ? rows[0].newdate : new Date(rows[0].newdate);
       }
     } catch (e) {
-      // ignore date fetch failure, proceed with broad replication
+      console.log(`[REPLICATION] Could not fetch date: ${e.message}`);
     }
   }
-  
-  console.log(`[REPLICATION] Decision - Source: ${sourceNode}, Date: ${recordDate}, Boundary: ${FRAG_BOUNDARY}`);
 
+  // Determine target nodes based on fragmentation rules
   const targets = [];
   if (sourceNode === 'node0') {
+    // Master replicates to fragments
     if (recordDate) {
-      if (recordDate < FRAG_BOUNDARY) {
-        targets.push('node1');
-        console.log(`[TARGET] Replicating to node1 (pre-1997): ${recordDate} < ${FRAG_BOUNDARY}`);
-      } else {
-        targets.push('node2');
-        console.log(`[TARGET] Replicating to node2 (1997+): ${recordDate} >= ${FRAG_BOUNDARY}`);
-      }
+      targets.push(recordDate < FRAG_BOUNDARY ? 'node1' : 'node2');
     } else {
-      // Fallback if we cannot determine date: replicate to both fragments
-      console.log(`[WARNING] Could not determine date, replicating to both fragments`);
-      targets.push('node1', 'node2');
+      targets.push('node1', 'node2'); // Unknown date - replicate to both
     }
   } else {
-    // Writing on a fragment: replicate to master only AFTER validating fragment rule
-    if (recordDate) {
-      const violatesNode1 = sourceNode === 'node1' && recordDate >= FRAG_BOUNDARY;
-      const violatesNode2 = sourceNode === 'node2' && recordDate < FRAG_BOUNDARY;
-      if (violatesNode1 || violatesNode2) {
-        // Push a failed replication entry noting violation
-        const violationEntry = { id: uuidv4(), source: sourceNode, target: 'node0', query, status: 'failed', error: 'Fragment rule violation (date outside fragment range)', time: new Date(), fragmentRouting: { transId, recordDate } };
-        replicationQueue.push(violationEntry);
-        return [violationEntry];
-      }
-    }
+    // Fragments replicate back to master
     targets.push('node0');
   }
-  // Step 1: Acquire distributed locks on all target nodes BEFORE replication
-  const lockResult = await acquireDistributedLocks(targets, transId, sourceNode);
-  
+
+  console.log(`[REPLICATION] ${sourceNode} → [${targets.join(', ')}] trans_id=${transId}`);
+
+  // Execute replication to each target
   const results = [];
-  
-  // If we couldn't acquire all locks, fail fast and release any acquired locks
-  if (!lockResult.success && lockResult.errors.length > 0) {
-    console.warn(`Failed to acquire all distributed locks for trans_id=${transId}:`, lockResult.errors);
-    // Release any locks we did acquire
-    await releaseDistributedLocks(lockResult.lockedNodes, transId, sourceNode);
-    
-    // Return failed entries for nodes we couldn't lock
-    for (const error of lockResult.errors) {
-      const entry = {
-        id: uuidv4(),
-        source: sourceNode,
-        target: error.node,
-        query,
-        status: 'failed',
-        error: `Lock acquisition failed: ${error.error}`,
-        time: new Date(),
-        fragmentRouting: { transId, recordDate }
-      };
-      replicationQueue.push(entry);
-      results.push(entry);
-    }
-  }
-  
-  // Step 2: Replicate to targets (only those we successfully locked)
-  console.log(`[REPLICATION] Starting to targets: [${lockResult.lockedNodes.join(', ')}]`);
-  
-  for (const tgt of lockResult.lockedNodes) {
-    if (!pools[tgt]) continue;
-    const entry = { id: uuidv4(), source: sourceNode, target: tgt, query, status: 'pending', time: new Date(), fragmentRouting: { transId, recordDate } };
+  for (const target of targets) {
+    const entry = {
+      id: uuidv4(),
+      source: sourceNode,
+      target,
+      query,
+      status: 'pending',
+      time: new Date()
+    };
+
     try {
-      // Check if target node is in simulated failure state
-      if (simulatedFailures[tgt]) {
-        throw new Error(`Node ${tgt} is offline (simulated failure)`);
+      if (simulatedFailures[target]) {
+        throw new Error(`Node ${target} is offline (simulated)`);
       }
-      
-      console.log(`[REPLICATION] Replicating to ${tgt}...`);
-      const conn = await pools[tgt].getConnection();
-      if (isolationLevel) {
-        const iso = String(isolationLevel).replace(/_/g, ' ');
-        await conn.query(`SET SESSION TRANSACTION ISOLATION LEVEL ${iso}`);
-      }
+
+      const conn = await pools[target].getConnection();
       await conn.query(query);
       conn.release();
+      
       entry.status = 'replicated';
-      console.log(`[SUCCESS] Replicated to ${tgt}`);
+      console.log(`[REPLICATION SUCCESS] ${sourceNode} → ${target}`);
     } catch (e) {
       entry.status = 'failed';
       entry.error = e.message;
-      console.error(`[ERROR] Replication to ${tgt} FAILED: ${e.message}`);
-      console.error(`Query was: ${query}`);
+      console.log(`[REPLICATION FAILED] ${sourceNode} → ${target}: ${e.message}`);
     }
+
     replicationQueue.push(entry);
     results.push(entry);
   }
-  
-  // Step 3: Release distributed locks on all target nodes AFTER replication
-  await releaseDistributedLocks(lockResult.lockedNodes, transId, sourceNode);
-  
+
   return results;
 }
 
@@ -514,43 +390,39 @@ app.post('/api/query/execute', async (req, res) => {
 
   let connection = null;
   const isWrite = isWriteQuery(query);
-  const lockTransId = isWrite ? parseTransId(query) : null;
+  const lockTransId = parseTransId(query);
+  const effectiveIsolation = isolationLevel || 'READ_COMMITTED';
   
   try {
     connection = await pools[node].getConnection();
     
-    // Acquire database-level lock for writes BEFORE executing query
+    // SIMPLE TRANSACTION TRACKING (Custom implementation)
     if (isWrite && lockTransId) {
-      const lock = await acquireLock(connection, lockTransId, node);
-      if (!lock.ok) {
-        connection.release();
-        logEntry.status = 'failed';
-        logEntry.endTime = new Date();
-        logEntry.error = lock.error;
-        transactionLog.push(logEntry);
-        return res.status(423).json({ transactionId, error: lock.error, logEntry });
-      }
+      // Start transaction - marks it as active globally (waits if already active)
+      await startTransaction(lockTransId, node);
+      console.log(`[TXN START] trans_id=${lockTransId} on ${node} (${effectiveIsolation})`);
     }
     
-    // Set isolation level (normalize values like READ_COMMITTED -> READ COMMITTED)
-    if (isolationLevel) {
-      const iso = String(isolationLevel).replace(/_/g, ' ');
-      await connection.query(`SET SESSION TRANSACTION ISOLATION LEVEL ${iso}`);
+    // For reads: Wait for uncommitted transactions (except READ_UNCOMMITTED)
+    if (!isWrite && lockTransId) {
+      await canReadProceed(lockTransId, effectiveIsolation);
     }
 
+    // Execute query
     const [results] = await connection.query(query);
 
     logEntry.status = 'committed';
     logEntry.endTime = new Date();
     logEntry.results = results;
     
-    // Attempt simple replication if write (includes distributed lock propagation)
-    const replicationResults = await replicateWrite(node, query, isolationLevel);
+    // Replicate write to other nodes
+    const replicationResults = await replicateWrite(node, query);
     logEntry.replication = replicationResults.map(r => ({ target: r.target, status: r.status }));
 
-    // Release lock after commit & replication attempt
-    if (isWrite && lockTransId) {
-      await releaseLock(connection, lockTransId, node);
+    // Commit transaction - removes from active transactions
+    if (lockTransId) {
+      commitTransaction(lockTransId);
+      console.log(`[TXN COMMIT] trans_id=${lockTransId} on ${node}`);
     }
     
     connection.release();
@@ -567,9 +439,10 @@ app.post('/api/query/execute', async (req, res) => {
     logEntry.endTime = new Date();
     logEntry.error = error.message;
     
-    // Ensure lock release on error
-    if (connection && isWrite && lockTransId) {
-      await releaseLock(connection, lockTransId, node);
+    // Abort transaction on error
+    if (lockTransId) {
+      commitTransaction(lockTransId); // Clean up active transaction
+      console.log(`[TXN ABORT] trans_id=${lockTransId} on ${node}`);
     }
     
     if (connection) {
@@ -599,6 +472,21 @@ app.get('/api/replication/queue', (req, res) => {
   res.json({
     queue: replicationQueue,
     total: replicationQueue.length
+  });
+});
+
+// 6b. Get Active Transactions (for debugging concurrency control)
+app.get('/api/locks/status', (req, res) => {
+  const activeTxns = Object.keys(activeTransactions).map(transId => ({
+    transactionId: transId,
+    ...activeTransactions[transId]
+  }));
+  
+  res.json({
+    activeTransactions: activeTxns,
+    total: activeTxns.length,
+    concurrencyControl: 'CUSTOM_TRANSACTION_TRACKING',
+    implementation: 'Simple in-memory transaction state tracking'
   });
 });
 

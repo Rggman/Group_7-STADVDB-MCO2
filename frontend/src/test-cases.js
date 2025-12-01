@@ -32,41 +32,77 @@ export async function case1ConcurrentReads(nodeA, nodeB, recordId, isolationLeve
   }
 }
 
-// Case 2: one write then concurrent reads from writer + 2 readers
+// Case 2: Write + concurrent reads
 export async function case2WritePlusReads(writerNode, readerA, readerB, recordId, newValue, isolationLevel) {
   const id = Number(recordId);
   const val = Number(newValue);
   const iso = isolationLevel || 'READ_COMMITTED';
   const updateQuery = `UPDATE trans SET amount = ${val} WHERE trans_id = ${id}`;
   const selectQuery = `SELECT * FROM trans WHERE trans_id = ${id}`;
-  let writeResult;
-  try {
-    writeResult = await apiClient.post('/query/execute', { node: writerNode, query: updateQuery, isolationLevel: iso });
-  } catch (e) {
-    writeResult = { status: 'failed', error: e.message };
-  }
-  // Concurrent reads
-  const readPromises = [
+  
+  // Execute write first, THEN concurrent reads
+  // This ensures reads happen after write starts (testing concurrent behavior during commit)
+  const writePromise = apiClient.post('/query/execute', { node: writerNode, query: updateQuery, isolationLevel: iso });
+  
+  // Small delay to ensure write has started before reads begin
+  await new Promise(resolve => setTimeout(resolve, 10));
+  
+  // Now fire all reads concurrently
+  const [writeResult, wRead, aRead, bRead] = await Promise.allSettled([
+    writePromise,
     apiClient.post('/query/execute', { node: writerNode, query: selectQuery, isolationLevel: iso }),
     apiClient.post('/query/execute', { node: readerA, query: selectQuery, isolationLevel: iso }),
     apiClient.post('/query/execute', { node: readerB, query: selectQuery, isolationLevel: iso })
-  ];
-  const [wRead, aRead, bRead] = await Promise.allSettled(readPromises);
+  ]);
+  
   const unwrap = r => r.status === 'fulfilled' ? (r.value.data.results || []) : [];
-  const replication = writeResult?.data?.replication || [];
+  const unwrapWrite = r => {
+    if (r.status === 'fulfilled') {
+      return {
+        status: r.value.data?.logEntry?.status || 'unknown',
+        replication: r.value.data?.replication || []
+      };
+    }
+    return {
+      status: 'failed',
+      error: r.reason?.response?.data?.error || r.reason?.message || 'Unknown error'
+    };
+  };
+
+  const write = unwrapWrite(writeResult);
+  const writerData = unwrap(wRead);
+  const readerAData = unwrap(aRead);
+  const readerBData = unwrap(bRead);
+
+  // Check if readers saw different values (expected for REPEATABLE_READ/READ_UNCOMMITTED)
+  const values = [
+    writerData[0]?.amount,
+    readerAData[0]?.amount,
+    readerBData[0]?.amount
+  ].filter(v => v !== undefined);
+  
+  const uniqueValues = [...new Set(values)];
+  const sawDifferentValues = uniqueValues.length > 1;
 
   return {
     isolation: iso,
     write: {
-      status: writeResult?.data?.logEntry?.status || writeResult.status || 'unknown',
-      error: writeResult.error,
+      status: write.status,
+      error: write.error,
       query: updateQuery,
-      replication
+      replication: write.replication
     },
     reads: {
-      writer: unwrap(wRead),
-      readerA: unwrap(aRead),
-      readerB: unwrap(bRead)
+      writer: writerData,
+      readerA: readerAData,
+      readerB: readerBData
+    },
+    concurrency: {
+      sawDifferentValues,
+      uniqueValues,
+      expected: iso === 'READ_UNCOMMITTED'
+        ? 'May see different values (dirty reads allowed across all nodes)'
+        : 'Should see consistent values (reads wait for write to commit)'
     }
   };
 }

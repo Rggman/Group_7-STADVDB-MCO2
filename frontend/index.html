@@ -512,10 +512,23 @@
         const dataB = JSON.stringify(dataBArr, null, 2);
         const rep = res.write?.replication || [];
         const repLines = rep.length ? rep.map(r => `Target: ${r.target} | Status: ${r.status}${r.error ? ' | Error: '+r.error : ''}`).join('\n') : 'No replication performed';
+        
+        // Concurrency detection
+        const concurrency = res.concurrency || {};
+        const sawDifferent = concurrency.sawDifferentValues || false;
+        const uniqueVals = concurrency.uniqueValues || [];
+        const expected = concurrency.expected || '';
+        const concurrencyClass = sawDifferent ? 'success' : 'warning';
+        const concurrencyMsg = sawDifferent 
+          ? `✓ Readers observed different values during concurrent execution (${uniqueVals.join(', ')})`
+          : '⚠ All readers observed the same value (may indicate sequential execution or strict locking)';
+        
         out.innerHTML = `
           <div class="log-entry success">Isolation: ${isolation.replace('_',' ')}</div>
           <div class="log-entry">Write Status: ${writeStatus}</div>
           <div class="log-entry">Record ID: ${recordId} Updated To: ${newValue}</div>
+          <div class="log-entry ${concurrencyClass}"><strong>Concurrency Detection:</strong> ${concurrencyMsg}</div>
+          <div class="log-entry">Expected Behavior: ${expected}</div>
           <div class="log-entry">Consistency vs Reader A: ${equalA ? 'MATCH' : 'DIFF'}</div>
           <div class="log-entry">Consistency vs Reader B: ${equalB ? 'MATCH' : 'DIFF'}</div>
           <div class="log-entry"><strong>Replication Details</strong></div>
