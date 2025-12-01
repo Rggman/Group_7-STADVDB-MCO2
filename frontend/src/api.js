@@ -19,8 +19,14 @@ export const executeQuery = (node, query, isolationLevel) =>
   apiClient.post('/query/execute', { node, query, isolationLevel });
 
 // Data Retrieval
-export const getNodeData = (node, table = 'trans') =>
-  apiClient.get(`/data/${node}`, { params: { table } });
+export const getNodeData = (node, table = 'trans', filter = 'all', additionalParams = {}) =>
+  apiClient.get(`/data/${node}`, { 
+    params: { 
+      table, 
+      filter,
+      ...additionalParams 
+    } 
+  });
 
 // Logs
 export const getTransactionLogs = () => apiClient.get('/logs/transactions');

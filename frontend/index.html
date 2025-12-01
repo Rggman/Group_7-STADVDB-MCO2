@@ -441,6 +441,7 @@
   <script type="module">
     import * as app from './src/app.js';
     import { case1ConcurrentReads, case2WritePlusReads, case3ConcurrentWrites } from './src/test-cases.js';
+    import { apiClient } from './src/api.js';
     
     // Make app functions globally accessible
     window.app = app;
@@ -701,15 +702,19 @@
       transIdInput.style.display = filter === 'by_trans_id' ? 'block' : 'none';
       
       try {
-        // Build query parameters
-        let queryParams = `?filter=${filter}`;
+        // Build additional parameters
+        const params = {
+          filter: filter,
+          table: 'trans'
+        };
+        
         if (filter === 'by_trans_id' && transIdInput.value) {
-          queryParams += `&trans_id=${transIdInput.value}`;
+          params.trans_id = transIdInput.value;
         }
         
-        // Fetch filtered data
-        const response = await fetch(`http://localhost:5000/api/data/${window.currentModalNode}${queryParams}`);
-        const data = await response.json();
+        // Fetch filtered data using the imported API client
+        const response = await apiClient.get(`/data/${window.currentModalNode}`, { params });
+        const data = response.data;
         
         // Update modal with new data
         window.showDataModal(window.currentModalNode, data);
