@@ -41,8 +41,8 @@ jobs:
             echo "Building Frontend..."
             cd frontend
             npm install
-            # INJECT PRODUCTION API URL HERE:
-            export VITE_API_URL="http://ccscloud.dlsu.edu.ph:5000/api"
+            # USE SPECIFIC OPEN PORT (Change 60110 to your actual backend port)
+            export VITE_API_URL="http://ccscloud.dlsu.edu.ph:3001/api"
             npm run build
             cd ..
             
