@@ -40,32 +40,26 @@ export async function case2WritePlusReads(writerNode, readerA, readerB, recordId
   const updateQuery = `UPDATE trans SET amount = ${val} WHERE trans_id = ${id}`;
   const selectQuery = `SELECT * FROM trans WHERE trans_id = ${id}`;
   
-  // Execute write first, THEN concurrent reads
-  // This ensures reads happen after write starts (testing concurrent behavior during commit)
-  const writePromise = apiClient.post('/query/execute', { node: writerNode, query: updateQuery, isolationLevel: iso });
+  // CRITICAL FIX: Execute write and reads in PARALLEL using Promise.all
+  // This ensures reads happen DURING the write, not after it completes
+  // This is the ONLY way to see dirty reads with READ_UNCOMMITTED
   
-  // Small delay to ensure write has started before reads begin
-  await new Promise(resolve => setTimeout(resolve, 10));
+  console.log(`[CASE 2] Starting concurrent write + reads with ${iso}...`);
   
-  // Now fire all reads concurrently
-  const [writeResult, wRead, aRead, bRead] = await Promise.allSettled([
-    writePromise,
+  const [writeResult, wRead, aRead, bRead] = await Promise.all([
+    apiClient.post('/query/execute', { node: writerNode, query: updateQuery, isolationLevel: iso }),
     apiClient.post('/query/execute', { node: writerNode, query: selectQuery, isolationLevel: iso }),
     apiClient.post('/query/execute', { node: readerA, query: selectQuery, isolationLevel: iso }),
     apiClient.post('/query/execute', { node: readerB, query: selectQuery, isolationLevel: iso })
   ]);
   
-  const unwrap = r => r.status === 'fulfilled' ? (r.value.data.results || []) : [];
+  console.log(`[CASE 2] All operations completed`);
+  
+  const unwrap = r => r.data.results || [];
   const unwrapWrite = r => {
-    if (r.status === 'fulfilled') {
-      return {
-        status: r.value.data?.logEntry?.status || 'unknown',
-        replication: r.value.data?.replication || []
-      };
-    }
     return {
-      status: 'failed',
-      error: r.reason?.response?.data?.error || r.reason?.message || 'Unknown error'
+      status: r.data?.logEntry?.status || 'unknown',
+      replication: r.data?.replication || []
     };
   };
 
@@ -74,7 +68,7 @@ export async function case2WritePlusReads(writerNode, readerA, readerB, recordId
   const readerAData = unwrap(aRead);
   const readerBData = unwrap(bRead);
 
-  // Check if readers saw different values (expected for REPEATABLE_READ/READ_UNCOMMITTED)
+  // Check if readers saw different values (expected for READ_UNCOMMITTED - dirty reads)
   const values = [
     writerData[0]?.amount,
     readerAData[0]?.amount,
@@ -83,6 +77,13 @@ export async function case2WritePlusReads(writerNode, readerA, readerB, recordId
   
   const uniqueValues = [...new Set(values)];
   const sawDifferentValues = uniqueValues.length > 1;
+
+  if (sawDifferentValues) {
+    console.log(`[CASE 2] ⚠️ DIRTY READS DETECTED: Read values varied: [${uniqueValues.join(', ')}]`);
+    console.log(`[CASE 2] This is ${iso === 'READ_UNCOMMITTED' ? 'EXPECTED' : 'UNEXPECTED'} for ${iso}`);
+  } else {
+    console.log(`[CASE 2] All reads consistent: ${values.length > 0 ? values[0] : 'N/A'}`);
+  }
 
   return {
     isolation: iso,

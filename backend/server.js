@@ -108,12 +108,31 @@ let transactionLog = [];
 // ============================================================================
 
 // =============================================================================
-// SIMPLE CONCURRENCY CONTROL - ISOLATION LEVELS
+// COMPREHENSIVE CONCURRENCY CONTROL - ISOLATION LEVELS
 // =============================================================================
 
-// Track active (uncommitted) transactions globally
-let activeTransactions = {};
-// { "trans_123": { node: "node0", startTime: timestamp } }
+/**
+ * Transaction State Tracking
+ * Each transaction tracks:
+ * - transactionId: Unique identifier
+ * - node: Origin node
+ * - isolationLevel: READ_UNCOMMITTED, READ_COMMITTED, REPEATABLE_READ, SERIALIZABLE
+ * - startTime: When transaction started
+ * - readSet: Set of trans_ids this transaction has read
+ * - writeSet: Set of trans_ids this transaction has written
+ * - locks: { transId: { type: 'read'|'write', acquired: timestamp } }
+ * - snapshot: For REPEATABLE_READ, stores data snapshot at transaction start
+ * - status: 'active' | 'committed' | 'aborted'
+ */
+let transactions = {};
+// { "txn_uuid": { transactionId, node, isolationLevel, startTime, readSet, writeSet, locks, snapshot, status } }
+
+/**
+ * Lock Manager
+ * Tracks locks on individual trans_ids
+ * { "trans_123": { readers: [txn_id1, txn_id2], writer: txn_id3 or null } }
+ */
+let lockTable = {};
 
 const TRANSACTION_TIMEOUT = 5000; // 5 seconds
 
@@ -129,70 +148,252 @@ function isWriteQuery(query) {
 }
 
 /**
- * Check if read can proceed based on isolation level
- * Simple rule: If transaction is active, wait (except READ_UNCOMMITTED)
+ * ISOLATION LEVEL SPECIFIC BEHAVIORS:
+ * 
+ * READ_UNCOMMITTED:
+ * - NO locks acquired (not even for writes!)
+ * - Can read uncommitted data (dirty reads)
+ * - Highest concurrency, lowest consistency
+ * 
+ * READ_COMMITTED:
+ * - SHORT write locks (released immediately after query)
+ * - NO read locks
+ * - Cannot read uncommitted data
+ * - Locks prevent lost updates but allow non-repeatable reads
+ * 
+ * REPEATABLE_READ:
+ * - LONG write locks (released at commit)
+ * - READ locks for snapshot consistency
+ * - Uses snapshot isolation
+ * - Prevents non-repeatable reads
+ * 
+ * SERIALIZABLE:
+ * - LONG read AND write locks (both released at commit)
+ * - Strictest isolation
+ * - Simulates serial execution
  */
-async function canReadProceed(transId, isolationLevel) {
-  if (!transId || !activeTransactions[transId]) {
-    return true; // No active transaction, proceed
-  }
-  
-  // READ_UNCOMMITTED: Always proceed (dirty reads allowed)
-  if (isolationLevel === 'READ_UNCOMMITTED') {
-    console.log(`[READ_UNCOMMITTED] Dirty read allowed on trans_id=${transId}`);
-    return true;
-  }
-  
-  // All other levels: Wait for transaction to commit
-  console.log(`[${isolationLevel}] Waiting for trans_id=${transId} to commit...`);
-  const startWait = Date.now();
-  
-  while (activeTransactions[transId]) {
-    if (Date.now() - startWait > TRANSACTION_TIMEOUT) {
-      throw new Error(`${isolationLevel}: Timeout waiting for transaction`);
-    }
-    await new Promise(resolve => setTimeout(resolve, 50));
-  }
-  
-  console.log(`[${isolationLevel}] Transaction committed, proceeding with read`);
-  return true;
-}
 
 /**
- * Start a transaction (mark as active)
- * If transaction already active, wait for it to complete (prevents concurrent writes)
+ * Acquire lock based on isolation level
+ * Returns: { success: true } or { success: false, reason: string }
  */
-async function startTransaction(transId, node) {
-  if (!transId) return;
+async function acquireLock(txnId, transId, lockType, isolationLevel) {
+  // READ_UNCOMMITTED: NO locks at all
+  if (isolationLevel === 'READ_UNCOMMITTED') {
+    console.log(`[${isolationLevel}] No lock needed for ${lockType} on trans_id=${transId}`);
+    return { success: true };
+  }
   
-  // Wait if same transaction is already active (prevents concurrent writes to same record)
-  if (activeTransactions[transId]) {
-    console.log(`[TXN WAIT] trans_id=${transId} already active on ${activeTransactions[transId].node}, waiting...`);
-    const startWait = Date.now();
-    
-    while (activeTransactions[transId]) {
-      if (Date.now() - startWait > TRANSACTION_TIMEOUT) {
-        throw new Error(`Transaction ${transId}: Timeout waiting for concurrent write to complete`);
+  // Initialize lock entry if doesn't exist
+  if (!lockTable[transId]) {
+    lockTable[transId] = { readers: [], writer: null };
+  }
+  
+  const lock = lockTable[transId];
+  const startWait = Date.now();
+  
+  if (lockType === 'write') {
+    // WAIT for conflicts to clear
+    while (true) {
+      // Check for conflicts: Can't acquire write lock if there are readers or another writer
+      if (lock.writer && lock.writer !== txnId) {
+        console.log(`[${isolationLevel}] Write waiting for writer ${lock.writer} on trans_id=${transId}...`);
+      } else if (lock.readers.length > 0 && !lock.readers.every(r => r === txnId)) {
+        console.log(`[${isolationLevel}] Write waiting for ${lock.readers.length} readers on trans_id=${transId}...`);
+      } else {
+        // No conflicts - can acquire lock
+        break;
       }
+      
+      // Check timeout
+      if (Date.now() - startWait > TRANSACTION_TIMEOUT) {
+        console.log(`[${isolationLevel}] Write lock TIMEOUT on trans_id=${transId}`);
+        return { success: false, reason: `Timeout waiting for lock` };
+      }
+      
+      // Wait a bit before retrying
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     
-    console.log(`[TXN WAIT] trans_id=${transId} completed, proceeding...`);
+    // Acquire write lock
+    lock.writer = txnId;
+    console.log(`[${isolationLevel}] Write lock ACQUIRED on trans_id=${transId} by ${txnId}`);
+    
+    // Track lock in transaction
+    if (!transactions[txnId].locks[transId]) {
+      transactions[txnId].locks[transId] = { type: 'write', acquired: Date.now() };
+    }
+    
+  } else if (lockType === 'read') {
+    // READ_COMMITTED: No read locks needed
+    if (isolationLevel === 'READ_COMMITTED') {
+      // But WAIT for any active writer to commit (prevents dirty reads)
+      while (lock.writer && lock.writer !== txnId) {
+        console.log(`[${isolationLevel}] Read WAITING for writer to commit on trans_id=${transId}...`);
+        
+        if (Date.now() - startWait > TRANSACTION_TIMEOUT) {
+          console.log(`[${isolationLevel}] Read TIMEOUT on trans_id=${transId}`);
+          return { success: false, reason: `Timeout waiting for write to commit` };
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      
+      console.log(`[${isolationLevel}] Read proceeds (no lock needed) on trans_id=${transId}`);
+      return { success: true };
+    }
+    
+    // REPEATABLE_READ and SERIALIZABLE: Need read locks
+    // WAIT for conflicts to clear
+    while (lock.writer && lock.writer !== txnId) {
+      console.log(`[${isolationLevel}] Read waiting for writer ${lock.writer} on trans_id=${transId}...`);
+      
+      if (Date.now() - startWait > TRANSACTION_TIMEOUT) {
+        console.log(`[${isolationLevel}] Read lock TIMEOUT on trans_id=${transId}`);
+        return { success: false, reason: `Timeout waiting for write lock to release` };
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    
+    // Acquire read lock
+    if (!lock.readers.includes(txnId)) {
+      lock.readers.push(txnId);
+      console.log(`[${isolationLevel}] Read lock ACQUIRED on trans_id=${transId} by ${txnId}`);
+      
+      // Track lock in transaction
+      if (!transactions[txnId].locks[transId]) {
+        transactions[txnId].locks[transId] = { type: 'read', acquired: Date.now() };
+      }
+    }
   }
   
-  // Mark transaction as active
-  activeTransactions[transId] = { node, startTime: Date.now() };
-  console.log(`[TXN START] trans_id=${transId} on ${node}`);
+  return { success: true };
 }
 
 /**
- * Commit a transaction (mark as committed/remove from active)
+ * Release lock based on isolation level
  */
-function commitTransaction(transId) {
-  if (transId && activeTransactions[transId]) {
-    delete activeTransactions[transId];
-    console.log(`[TXN COMMIT] trans_id=${transId}`);
+function releaseLock(txnId, transId, isolationLevel) {
+  if (!lockTable[transId]) return;
+  
+  const lock = lockTable[transId];
+  
+  // READ_UNCOMMITTED: No locks to release
+  if (isolationLevel === 'READ_UNCOMMITTED') {
+    return;
   }
+  
+  // READ_COMMITTED: Release locks immediately
+  // REPEATABLE_READ, SERIALIZABLE: Release at commit (not called here)
+  if (lock.writer === txnId) {
+    lock.writer = null;
+    console.log(`[${isolationLevel}] Write lock RELEASED on trans_id=${transId} by ${txnId}`);
+  }
+  
+  const readerIndex = lock.readers.indexOf(txnId);
+  if (readerIndex >= 0) {
+    lock.readers.splice(readerIndex, 1);
+    console.log(`[${isolationLevel}] Read lock RELEASED on trans_id=${transId} by ${txnId}`);
+  }
+  
+  // Cleanup empty lock entries
+  if (lock.writer === null && lock.readers.length === 0) {
+    delete lockTable[transId];
+  }
+}
+
+/**
+ * Release all locks held by a transaction (called at commit/abort)
+ */
+function releaseAllLocks(txnId) {
+  const txn = transactions[txnId];
+  if (!txn) return;
+  
+  console.log(`[RELEASE ALL] Releasing all locks for ${txnId}`);
+  
+  for (const transId in txn.locks) {
+    if (lockTable[transId]) {
+      const lock = lockTable[transId];
+      
+      if (lock.writer === txnId) {
+        lock.writer = null;
+      }
+      
+      const readerIndex = lock.readers.indexOf(txnId);
+      if (readerIndex >= 0) {
+        lock.readers.splice(readerIndex, 1);
+      }
+      
+      // Cleanup
+      if (lock.writer === null && lock.readers.length === 0) {
+        delete lockTable[transId];
+      }
+    }
+  }
+  
+  txn.locks = {};
+}
+
+/**
+ * Start a new transaction
+ */
+function startTransaction(txnId, node, isolationLevel) {
+  transactions[txnId] = {
+    transactionId: txnId,
+    node,
+    isolationLevel,
+    startTime: Date.now(),
+    readSet: new Set(),
+    writeSet: new Set(),
+    locks: {},
+    snapshot: {}, // For REPEATABLE_READ
+    status: 'active'
+  };
+  
+  console.log(`[TXN START] ${txnId} on ${node} with ${isolationLevel}`);
+}
+
+/**
+ * Commit a transaction
+ */
+function commitTransaction(txnId) {
+  const txn = transactions[txnId];
+  if (!txn) return;
+  
+  txn.status = 'committed';
+  txn.endTime = Date.now();
+  
+  // Release all locks (for REPEATABLE_READ and SERIALIZABLE)
+  releaseAllLocks(txnId);
+  
+  console.log(`[TXN COMMIT] ${txnId} (duration: ${txn.endTime - txn.startTime}ms)`);
+  
+  // Cleanup transaction after a delay
+  setTimeout(() => {
+    delete transactions[txnId];
+  }, 1000);
+}
+
+/**
+ * Abort a transaction
+ */
+function abortTransaction(txnId) {
+  const txn = transactions[txnId];
+  if (!txn) return;
+  
+  txn.status = 'aborted';
+  txn.endTime = Date.now();
+  
+  // Release all locks
+  releaseAllLocks(txnId);
+  
+  console.log(`[TXN ABORT] ${txnId}`);
+  
+  // Cleanup
+  setTimeout(() => {
+    delete transactions[txnId];
+  }, 1000);
 }
 
 // Simple write replication utility (eager, same query forwarded to other nodes)
@@ -379,33 +580,78 @@ app.post('/api/query/execute', async (req, res) => {
   }
 
   const transactionId = uuidv4();
+  const effectiveIsolation = isolationLevel || 'READ_COMMITTED';
+  
   const logEntry = {
     transactionId,
     node,
     query,
-    isolationLevel: isolationLevel || 'READ_COMMITTED',
+    isolationLevel: effectiveIsolation,
     startTime: new Date(),
     status: 'pending'
   };
 
   let connection = null;
   const isWrite = isWriteQuery(query);
-  const lockTransId = parseTransId(query);
-  const effectiveIsolation = isolationLevel || 'READ_COMMITTED';
+  const transId = parseTransId(query);
   
   try {
     connection = await pools[node].getConnection();
     
-    // SIMPLE TRANSACTION TRACKING (Custom implementation)
-    if (isWrite && lockTransId) {
-      // Start transaction - marks it as active globally (waits if already active)
-      await startTransaction(lockTransId, node);
-      console.log(`[TXN START] trans_id=${lockTransId} on ${node} (${effectiveIsolation})`);
-    }
+    // Start transaction tracking
+    startTransaction(transactionId, node, effectiveIsolation);
+    const txn = transactions[transactionId];
     
-    // For reads: Wait for uncommitted transactions (except READ_UNCOMMITTED)
-    if (!isWrite && lockTransId) {
-      await canReadProceed(lockTransId, effectiveIsolation);
+    // ISOLATION LEVEL SPECIFIC LOCKING
+    if (isWrite && transId) {
+      // Write operation - acquire write lock
+      const lockResult = await acquireLock(transactionId, transId, 'write', effectiveIsolation);
+      
+      if (!lockResult.success) {
+        // Lock timeout - abort transaction
+        abortTransaction(transactionId);
+        connection.release();
+        
+        logEntry.status = 'timeout';
+        logEntry.error = lockResult.reason;
+        logEntry.endTime = new Date();
+        transactionLog.push(logEntry);
+        
+        return res.status(408).json({
+          transactionId,
+          error: `Write timeout: ${lockResult.reason}`,
+          isolationLevel: effectiveIsolation,
+          logEntry
+        });
+      }
+      
+      txn.writeSet.add(transId);
+      console.log(`[WRITE] trans_id=${transId} added to writeSet of ${transactionId}`);
+      
+    } else if (!isWrite && transId) {
+      // Read operation - acquire read lock (if needed by isolation level)
+      const lockResult = await acquireLock(transactionId, transId, 'read', effectiveIsolation);
+      
+      if (!lockResult.success) {
+        // Lock timeout - abort transaction
+        abortTransaction(transactionId);
+        connection.release();
+        
+        logEntry.status = 'timeout';
+        logEntry.error = lockResult.reason;
+        logEntry.endTime = new Date();
+        transactionLog.push(logEntry);
+        
+        return res.status(408).json({
+          transactionId,
+          error: `Read timeout: ${lockResult.reason}`,
+          isolationLevel: effectiveIsolation,
+          logEntry
+        });
+      }
+      
+      txn.readSet.add(transId);
+      console.log(`[READ] trans_id=${transId} added to readSet of ${transactionId}`);
     }
 
     // Execute query
@@ -414,16 +660,23 @@ app.post('/api/query/execute', async (req, res) => {
     logEntry.status = 'committed';
     logEntry.endTime = new Date();
     logEntry.results = results;
+    logEntry.readSet = Array.from(txn.readSet);
+    logEntry.writeSet = Array.from(txn.writeSet);
     
     // Replicate write to other nodes
     const replicationResults = await replicateWrite(node, query);
     logEntry.replication = replicationResults.map(r => ({ target: r.target, status: r.status }));
 
-    // Commit transaction - removes from active transactions
-    if (lockTransId) {
-      commitTransaction(lockTransId);
-      console.log(`[TXN COMMIT] trans_id=${lockTransId} on ${node}`);
+    // ISOLATION LEVEL SPECIFIC LOCK RELEASE
+    if (effectiveIsolation === 'READ_COMMITTED' && transId) {
+      // READ_COMMITTED: Release locks immediately
+      releaseLock(transactionId, transId, effectiveIsolation);
+      console.log(`[READ_COMMITTED] Lock released immediately for trans_id=${transId}`);
     }
+    // For REPEATABLE_READ and SERIALIZABLE: Locks released at commit
+    
+    // Commit transaction (releases remaining locks for REPEATABLE_READ/SERIALIZABLE)
+    commitTransaction(transactionId);
     
     connection.release();
     transactionLog.push(logEntry);
@@ -439,11 +692,8 @@ app.post('/api/query/execute', async (req, res) => {
     logEntry.endTime = new Date();
     logEntry.error = error.message;
     
-    // Abort transaction on error
-    if (lockTransId) {
-      commitTransaction(lockTransId); // Clean up active transaction
-      console.log(`[TXN ABORT] trans_id=${lockTransId} on ${node}`);
-    }
+    // Abort transaction on error (releases all locks)
+    abortTransaction(transactionId);
     
     if (connection) {
       connection.release();
@@ -477,16 +727,25 @@ app.get('/api/replication/queue', (req, res) => {
 
 // 6b. Get Active Transactions (for debugging concurrency control)
 app.get('/api/locks/status', (req, res) => {
-  const activeTxns = Object.keys(activeTransactions).map(transId => ({
-    transactionId: transId,
-    ...activeTransactions[transId]
+  const activeTxns = Object.keys(transactions).map(txnId => ({
+    transactionId: txnId,
+    ...transactions[txnId],
+    readSet: Array.from(transactions[txnId].readSet),
+    writeSet: Array.from(transactions[txnId].writeSet)
+  }));
+  
+  const locks = Object.keys(lockTable).map(transId => ({
+    trans_id: transId,
+    ...lockTable[transId]
   }));
   
   res.json({
     activeTransactions: activeTxns,
-    total: activeTxns.length,
-    concurrencyControl: 'CUSTOM_TRANSACTION_TRACKING',
-    implementation: 'Simple in-memory transaction state tracking'
+    totalTransactions: activeTxns.length,
+    locks: locks,
+    totalLocks: locks.length,
+    concurrencyControl: 'ISOLATION_LEVEL_AWARE_LOCKING',
+    implementation: 'READ_UNCOMMITTED=no locks, READ_COMMITTED=short locks, REPEATABLE_READ=long locks, SERIALIZABLE=read+write locks'
   });
 });
 
@@ -668,9 +927,11 @@ function getRecentlyUpdatedTransIds() {
 app.post('/api/logs/clear', (req, res) => {
   transactionLog = [];
   replicationQueue = [];
+  transactions = {};
+  lockTable = {};
   
   res.json({
-    message: 'Logs cleared',
+    message: 'Logs and locks cleared',
     timestamp: new Date()
   });
 });
