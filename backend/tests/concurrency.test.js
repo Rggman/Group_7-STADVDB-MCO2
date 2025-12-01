@@ -1,7 +1,7 @@
 /**
- * Concurrency Control Test Suite - 3 Cases × 4 Isolation Levels × 3 Iterations = 36 Tests
+ * Concurrency Control Test Suite
+ * Tests: 3 Cases × 4 Isolation Levels × 3 Iterations = 36 Tests
  * 
- * Tests concurrent transaction behavior across distributed nodes
  * Database Table: trans (trans_id, account_id, newdate, amount, balance)
  * 
  * Case 1: Concurrent READS (2+ nodes reading same data)
@@ -15,14 +15,14 @@ import request from 'supertest';
 import express from 'express';
 import cors from 'cors';
 
-// Test configuration
-const ISOLATION_LEVELS = ['READ_UNCOMMITTED', 'READ_COMMITTED', 'REPEATABLE_READ', 'SERIALIZABLE'];
-const TEST_ITERATIONS = 3;
-
-// Create test server with distributed database simulation
+// Create test server with mock distributed database behavior
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Test configuration
+const ISOLATION_LEVELS = ['READ_UNCOMMITTED', 'READ_COMMITTED', 'REPEATABLE_READ', 'SERIALIZABLE'];
+const TEST_ITERATIONS = 3;
 
 // Global test state
 let nodeStates = {
@@ -39,7 +39,9 @@ let mockDatabase = {
 
 let transactionLog = [];
 let replicationQueue = [];
-let lockRegistry = {}; // Track locks per transaction
+
+// Active transactions registry (simulating server.js activeTransactions)
+let activeTransactions = {};
 
 // Helper: Determine fragment based on date
 function getFragmentForDate(dateStr) {
@@ -47,52 +49,63 @@ function getFragmentForDate(dateStr) {
   return date < new Date('1997-01-01') ? 'node1' : 'node2';
 }
 
-// Helper: Simulate lock acquisition with proper isolation level behavior
-function acquireLock(transId, node, isolationLevel) {
-  const lockKey = `trans_${transId}`;
-  const existingLock = lockRegistry[lockKey];
+// Helper: Parse trans_id from query
+function parseTransId(query) {
+  const match = /WHERE\s+trans_id\s*=\s*(\d+)/i.exec(query || '');
+  return match ? parseInt(match[1], 10) : null;
+}
+
+// Helper: Check if query is a write
+function isWriteQuery(query) {
+  const upper = String(query || '').trim().toUpperCase();
+  return upper.startsWith('UPDATE') || upper.startsWith('INSERT') || upper.startsWith('DELETE');
+}
+
+// Simulate startTransaction (marks transaction as active)
+async function startTransaction(transId, node) {
+  if (!transId) return;
   
-  if (existingLock) {
-    // SERIALIZABLE: Strictest - always blocks on existing lock
-    if (isolationLevel === 'SERIALIZABLE') {
-      return { 
-        success: false, 
-        error: `Lock timeout - SERIALIZABLE isolation (locked by ${existingLock.node})` 
-      };
+  // Wait if same transaction is already active (prevents concurrent writes)
+  const startWait = Date.now();
+  while (activeTransactions[transId]) {
+    if (Date.now() - startWait > 5000) {
+      throw new Error(`Transaction ${transId}: Timeout waiting for concurrent write`);
     }
-    
-    // REPEATABLE_READ: Blocks if different node tries to acquire lock
-    if (isolationLevel === 'REPEATABLE_READ') {
-      if (existingLock.node !== node) {
-        return { 
-          success: false, 
-          error: `Lock conflict - REPEATABLE_READ isolation (locked by ${existingLock.node})` 
-        };
-      }
-    }
-    
-    // READ_COMMITTED and READ_UNCOMMITTED: Allow concurrent writes with last-write-wins
-    // They don't block (simulating optimistic locking behavior)
+    await new Promise(resolve => setTimeout(resolve, 50));
   }
   
-  lockRegistry[lockKey] = { 
-    node, 
-    timestamp: Date.now(), 
-    isolationLevel,
-    transId 
-  };
-  return { success: true };
+  // Mark transaction as active
+  activeTransactions[transId] = { node, startTime: Date.now() };
 }
 
-// Helper: Release lock
-function releaseLock(transId) {
-  const lockKey = `trans_${transId}`;
-  delete lockRegistry[lockKey];
+// Simulate commitTransaction (removes from active)
+function commitTransaction(transId) {
+  if (transId && activeTransactions[transId]) {
+    delete activeTransactions[transId];
+  }
 }
 
-// Helper: Check if isolation level allows dirty reads
-function canReadDirtyData(isolationLevel) {
-  return isolationLevel === 'READ_UNCOMMITTED';
+// Simulate canReadProceed (wait for active transaction except READ_UNCOMMITTED)
+async function canReadProceed(transId, isolationLevel) {
+  if (!transId || !activeTransactions[transId]) {
+    return true;
+  }
+  
+  // READ_UNCOMMITTED: Always proceed (dirty reads allowed)
+  if (isolationLevel === 'READ_UNCOMMITTED') {
+    return true;
+  }
+  
+  // All other levels: Wait for transaction to commit
+  const startWait = Date.now();
+  while (activeTransactions[transId]) {
+    if (Date.now() - startWait > 5000) {
+      throw new Error(`${isolationLevel}: Timeout waiting for transaction`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  
+  return true;
 }
 
 // API Endpoints
@@ -122,7 +135,7 @@ app.get('/api/nodes/status', (req, res) => {
 
 app.post('/api/query/execute', async (req, res) => {
   const { node, query, isolationLevel } = req.body;
-  const isoLevel = isolationLevel || 'READ_COMMITTED'; // MySQL default
+  const isoLevel = isolationLevel || 'READ_COMMITTED';
   const transactionId = 'tx-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6);
   const startTime = Date.now();
   
@@ -138,10 +151,7 @@ app.post('/api/query/execute', async (req, res) => {
     // Parse query type and extract trans_id
     if (query.toUpperCase().includes('SELECT')) {
       queryType = 'SELECT';
-      const whereMatch = query.match(/WHERE\s+trans_id\s*=\s*(\d+)/i);
-      if (whereMatch) {
-        transId = parseInt(whereMatch[1]);
-      }
+      transId = parseTransId(query);
     } else if (query.toUpperCase().includes('INSERT')) {
       queryType = 'INSERT';
       const valuesMatch = query.match(/VALUES\s*\(\s*(\d+),\s*'([^']+)',\s*'([^']+)',\s*([\d.]+),\s*([\d.]+)\s*\)/i);
@@ -157,67 +167,33 @@ app.post('/api/query/execute', async (req, res) => {
       }
     } else if (query.toUpperCase().includes('UPDATE')) {
       queryType = 'UPDATE';
-      const whereMatch = query.match(/WHERE\s+trans_id\s*=\s*(\d+)/i);
-      if (whereMatch) {
-        transId = parseInt(whereMatch[1]);
-        const existingRecord = mockDatabase[node].find(r => r.trans_id === transId);
-        if (existingRecord) {
-          transData = { ...existingRecord };
-          
-          // Parse SET clause for amount and balance
-          const amountMatch = query.match(/amount\s*=\s*([\d.]+)/i);
-          const balanceMatch = query.match(/balance\s*=\s*([\d.]+)/i);
-          
-          if (amountMatch) transData.amount = parseFloat(amountMatch[1]);
-          if (balanceMatch) transData.balance = parseFloat(balanceMatch[1]);
-        }
+      transId = parseTransId(query);
+      const existingRecord = mockDatabase[node].find(r => r.trans_id === transId);
+      if (existingRecord) {
+        transData = { ...existingRecord };
+        
+        const amountMatch = query.match(/amount\s*=\s*([\d.]+)/i);
+        const balanceMatch = query.match(/balance\s*=\s*([\d.]+)/i);
+        
+        if (amountMatch) transData.amount = parseFloat(amountMatch[1]);
+        if (balanceMatch) transData.balance = parseFloat(balanceMatch[1]);
       }
     } else if (query.toUpperCase().includes('DELETE')) {
       queryType = 'DELETE';
-      const whereMatch = query.match(/WHERE\s+trans_id\s*=\s*(\d+)/i);
-      if (whereMatch) {
-        transId = parseInt(whereMatch[1]);
-      }
+      transId = parseTransId(query);
     }
 
-    // Check for lock conflicts on READS for SERIALIZABLE isolation
-    if (queryType === 'SELECT' && transId && isoLevel === 'SERIALIZABLE') {
-      const lockKey = `trans_${transId}`;
-      if (lockRegistry[lockKey]) {
-        return res.status(423).json({
-          error: `Read blocked - SERIALIZABLE isolation (write lock exists)`,
-          transactionId,
-          logEntry: {
-            transactionId,
-            node,
-            query,
-            status: 'failed',
-            error: 'Blocked by write lock (SERIALIZABLE)',
-            isolationLevel: isoLevel
-          }
-        });
-      }
-    }
+    const isWrite = isWriteQuery(query);
 
-    // Simulate lock acquisition for writes
-    let lockResult = { success: true };
-    if ((queryType === 'UPDATE' || queryType === 'DELETE') && transId) {
-      lockResult = acquireLock(transId, node, isoLevel);
-      
-      if (!lockResult.success) {
-        return res.status(423).json({
-          error: lockResult.error,
-          transactionId,
-          logEntry: {
-            transactionId,
-            node,
-            query,
-            status: 'failed',
-            error: lockResult.error,
-            isolationLevel: isoLevel
-          }
-        });
-      }
+    // SIMPLE TRANSACTION TRACKING (simulating server.js logic)
+    if (isWrite && transId) {
+      // Start transaction - waits if already active
+      await startTransaction(transId, node);
+    }
+    
+    // For reads: Wait for uncommitted transactions (except READ_UNCOMMITTED)
+    if (!isWrite && transId) {
+      await canReadProceed(transId, isoLevel);
     }
 
     // Execute query on local node
@@ -226,15 +202,6 @@ app.post('/api/query/execute', async (req, res) => {
     if (queryType === 'SELECT') {
       if (transId) {
         const record = mockDatabase[node].find(r => r.trans_id === transId);
-        
-        // Log if dirty read is possible (READ_UNCOMMITTED with active write lock)
-        if (record && canReadDirtyData(isoLevel)) {
-          const lockKey = `trans_${transId}`;
-          if (lockRegistry[lockKey]) {
-            console.log(`  [${isoLevel}] DIRTY READ POSSIBLE: Reading data with active write lock on trans_id=${transId}`);
-          }
-        }
-        
         results = record ? [record] : [];
       } else {
         results = [...mockDatabase[node]];
@@ -245,27 +212,7 @@ app.post('/api/query/execute', async (req, res) => {
     } else if (queryType === 'UPDATE' && transData) {
       const index = mockDatabase[node].findIndex(r => r.trans_id === transData.trans_id);
       if (index >= 0) {
-        // For READ_UNCOMMITTED: Write intermediate uncommitted state first
-        if (isoLevel === 'READ_UNCOMMITTED') {
-          // Write half-updated state (simulating uncommitted data)
-          const oldData = mockDatabase[node][index];
-          const intermediateData = {
-            ...oldData,
-            amount: transData.amount, // Update amount first
-            balance: oldData.balance   // Keep old balance (partial update)
-          };
-          mockDatabase[node][index] = intermediateData;
-          
-          // Small delay to allow concurrent reads to see uncommitted state
-          await new Promise(resolve => setTimeout(resolve, 50));
-          
-          // Now commit the full update
-          mockDatabase[node][index] = transData;
-          console.log(`  [${isoLevel}] UPDATE: Simulated uncommitted intermediate state visible to dirty reads`);
-        } else {
-          // For other isolation levels: Atomic update
-          mockDatabase[node][index] = transData;
-        }
+        mockDatabase[node][index] = transData;
         results = [{ affectedRows: 1 }];
       } else {
         results = [{ affectedRows: 0 }];
@@ -289,7 +236,6 @@ app.post('/api/query/execute', async (req, res) => {
         const targetFragment = getFragmentForDate(transData.newdate);
         
         if (nodeStates[targetFragment] === 'online') {
-          // Replicate to fragment
           if (queryType === 'INSERT') {
             mockDatabase[targetFragment].push(transData);
           } else if (queryType === 'UPDATE') {
@@ -304,12 +250,6 @@ app.post('/api/query/execute', async (req, res) => {
             }
           }
           replicationResults.push({ target: targetFragment, status: 'replicated' });
-        } else {
-          replicationResults.push({
-            target: targetFragment,
-            status: 'failed',
-            error: `Target node ${targetFragment} is offline`
-          });
         }
       } else {
         // Fragment to central replication
@@ -328,30 +268,17 @@ app.post('/api/query/execute', async (req, res) => {
             }
           }
           replicationResults.push({ target: 'node0', status: 'replicated' });
-        } else {
-          replicationResults.push({
-            target: 'node0',
-            status: 'failed',
-            error: 'Central node (node0) is offline'
-          });
         }
       }
     }
 
-    // Release lock after execution with timing based on isolation level
-    if ((queryType === 'UPDATE' || queryType === 'DELETE') && transId) {
-      if (isoLevel === 'READ_UNCOMMITTED') {
-        // Release immediately (allows dirty reads)
-        releaseLock(transId);
-      } else {
-        // Delay release slightly to simulate transaction boundary
-        setTimeout(() => releaseLock(transId), 10);
-      }
+    // Commit transaction (removes from active transactions)
+    if (transId) {
+      commitTransaction(transId);
     }
 
     const endTime = Date.now();
     
-    // Log transaction
     const logEntry = {
       transactionId,
       node,
@@ -376,6 +303,12 @@ app.post('/api/query/execute', async (req, res) => {
     });
 
   } catch (error) {
+    // Abort transaction on error
+    const transId = parseTransId(query);
+    if (transId) {
+      commitTransaction(transId);
+    }
+    
     res.status(500).json({ error: error.message });
   }
 });
@@ -408,7 +341,7 @@ app.get('/api/data/:node', (req, res) => {
 app.post('/api/logs/clear', (req, res) => {
   transactionLog = [];
   replicationQueue = [];
-  lockRegistry = {};
+  activeTransactions = {};
   res.json({ message: 'Logs cleared', timestamp: new Date() });
 });
 
