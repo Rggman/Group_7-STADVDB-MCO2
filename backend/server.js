@@ -668,6 +668,7 @@ app.get('/api/data/:node', async (req, res) => {
     return res.status(400).json({ error: 'Invalid node' });
   }
 
+  let connection = null;
   try {
     console.log(`[CONNECTION] Getting connection for ${node}...`);
     connection = await pools[node].getConnection();
