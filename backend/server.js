@@ -24,12 +24,6 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Prevent caching for all API routes
-app.use((req, res, next) => {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-  next();
-});
-
 // Database Configuration
 const dbConfig = {
   node0: {
@@ -464,12 +458,28 @@ async function checkNodeHealth() {
       return;
     }
 
+    let connection = null;
     try {
-      const connection = await pools[node].getConnection();
-      await connection.query('SELECT 1');
+      if (!pools[node]) throw new Error('Pool not initialized');
+
+      // Race condition to enforce strict timeout on connection acquisition
+      const getConnectionPromise = pools[node].getConnection();
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Connection acquisition timed out')), 2000)
+      );
+      
+      connection = await Promise.race([getConnectionPromise, timeoutPromise]);
+      
+      // Enforce timeout on the query itself
+      await connection.query({ sql: 'SELECT 1', timeout: 2000 });
+      
       connection.release();
       nodeStatus[node] = { status: 'online', lastCheck: new Date() };
     } catch (error) {
+      // If we obtained a connection but it failed, destroy it to remove from pool
+      if (connection) {
+        try { connection.destroy(); } catch (e) { /* ignore */ }
+      }
       nodeStatus[node] = { status: 'offline', lastCheck: new Date(), error: error.message };
     }
   });
