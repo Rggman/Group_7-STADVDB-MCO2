@@ -49,8 +49,8 @@ npm start
 
 Expected output:
 ```
-🚀 Distributed DB Simulator Backend running on port 5000
-📊 Health check: http://localhost:5000/health
+[SERVER] Distributed DB Simulator Backend running on port 5000
+[SERVER] Health check: http://localhost:5000/health
 
 Node Configuration:
   - Node 0 (Master): ccscloud.dlsu.edu.ph:60709

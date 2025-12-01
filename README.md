@@ -95,28 +95,28 @@ MCO2/
 
 ## Current Features (Phase 1)
 
-✅ **Multi-Node Connection Management**
+**Multi-Node Connection Management**
 - Connects to three separate database instances
 - Real-time node health checks
 - Connection pooling with error handling
 
-✅ **Basic UI Dashboard**
+**Basic UI Dashboard**
 - Node status indicators (online/offline)
 - Real-time status updates with auto-refresh
 - Query execution interface
 - Isolation level selection
 
-✅ **Query Execution**
+**Query Execution**
 - Execute SQL queries on selected nodes
 - Transaction logging
 - Selectable isolation levels
 
-✅ **Node Management**
+**Node Management**
 - Simulate node failures (kill)
 - Simulate node recovery
 - Status tracking
 
-✅ **Data Viewing**
+**Data Viewing**
 - View first 50 rows from any node
 - Modal-based data display
 

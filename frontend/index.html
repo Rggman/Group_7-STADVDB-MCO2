@@ -10,7 +10,7 @@
   <div class="container">
     <!-- Header -->
     <header class="header">
-      <h1>🗄️ Distributed Database Simulator</h1>
+      <h1>Distributed Database Simulator</h1>
       <p>Multi-Node Concurrency Control & Replication Management</p>
     </header>
 
@@ -23,7 +23,7 @@
       <!-- Left Sidebar: Node Management -->
       <section class="sidebar">
         <div class="section-card">
-          <h2>📊 Node Status</h2>
+          <h2>Node Status</h2>
           
           <div class="nodes-grid">
             <div class="node-card master">
@@ -62,7 +62,7 @@
         </div>
 
         <div class="section-card">
-          <h2>⚙️ Control Panel</h2>
+          <h2>Control Panel</h2>
           <button onclick="app.initializeApp()" class="btn-full primary">Reinitialize Backend</button>
           <button onclick="app.startAutoRefresh()" class="btn-full secondary">Start Auto-Refresh</button>
           <button onclick="app.stopAutoRefresh()" class="btn-full secondary">Stop Auto-Refresh</button>
@@ -171,7 +171,7 @@
           <!-- DELETE Operation -->
           <div id="deleteOperation" class="operation-panel">
             <h2>Delete Transaction</h2>
-            <p class="warning-text">⚠️ Deletion is executed on Node 0 (Master) and replicated to fragments. This action cannot be undone.</p>
+            <p class="warning-text">WARNING: Deletion is executed on Node 0 (Master) and replicated to fragments. This action cannot be undone.</p>
             
             <div class="form-group">
               <label>Transaction ID to Delete <span class="required">*</span></label>
@@ -180,7 +180,7 @@
             </div>
             
             <div id="deleteRecordDisplay" class="info-box" style="display:none; margin: 10px 0; padding: 10px; background: rgba(239, 68, 68, 0.1); border-left: 4px solid var(--danger-color);">
-              <strong>⚠️ Record to be Deleted:</strong>
+              <strong>Record to be Deleted:</strong>
               <div id="deleteRecordDetails"></div>
             </div>
             
@@ -209,7 +209,7 @@
 
         <!-- Transaction Logs -->
         <div class="section-card">
-          <h2>📝 Recent Transactions (Last 10)</h2>
+          <h2>Recent Transactions (Last 10)</h2>
           <div id="transaction-logs" class="logs-container">
             <div class="log-entry">No transactions yet</div>
           </div>
@@ -219,7 +219,7 @@
       <!-- Right Sidebar: Replication & Status -->
       <section class="sidebar">
         <div class="section-card">
-          <h2>🔄 Replication Queue</h2>
+          <h2>Replication Queue</h2>
           <div id="replication-queue" class="logs-container">
             <div class="queue-entry">Queue is empty</div>
           </div>
@@ -227,7 +227,7 @@
         </div>
 
         <div class="section-card">
-          <h2>🧪 Test Cases</h2>
+          <h2>Test Cases</h2>
           <button onclick="openCase1Modal()" class="btn-full info">Case 1: Concurrent Reads</button>
           <button onclick="openCase2Modal()" class="btn-full info">Case 2: Write + Reads</button>
           <button onclick="openCase3Modal()" class="btn-full info">Case 3: Concurrent Writes</button>
@@ -619,7 +619,7 @@
       
       // Update status info
       const statusText = `${data.count} rows | Filter: ${data.filter || 'all'} | Node: ${node}`;
-      const recentInfo = data.recent_updates_available ? ' | 🔄 Recent updates available' : '';
+      const recentInfo = data.recent_updates_available ? ' | Recent updates available' : '';
       statusDiv.innerHTML = statusText + recentInfo;
       
       let tableHTML = '<table class="data-table"><tr>';

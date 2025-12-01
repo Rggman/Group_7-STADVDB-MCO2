@@ -25,12 +25,12 @@ let refreshInterval = null;
 
 // Initialize Application
 export async function initializeApp() {
-  console.log('🚀 Initializing Distributed DB Simulator...');
+  console.log('[INIT] Initializing Distributed DB Simulator...');
   
   try {
     // Check backend health
     const healthResponse = await healthCheck();
-    console.log('✅ Backend connected:', healthResponse.data);
+    console.log('[OK] Backend connected:', healthResponse.data);
     
     // Initial load
     await refreshNodeStatus();
@@ -42,9 +42,9 @@ export async function initializeApp() {
       startAutoRefresh();
     }
     
-    console.log('✅ Application initialized successfully');
+    console.log('[OK] Application initialized successfully');
   } catch (error) {
-    console.error('❌ Error initializing app:', error);
+    console.error('[ERROR] Error initializing app:', error);
     showErrorMessage('Failed to connect to backend. Please check your server.');
   }
 }
@@ -60,7 +60,7 @@ export function startAutoRefresh() {
     updateUI();
   }, state.autoRefreshInterval);
   
-  console.log('🔄 Auto-refresh started');
+  console.log('[REFRESH] Auto-refresh started');
 }
 
 export function stopAutoRefresh() {
@@ -103,7 +103,7 @@ async function refreshReplicationQueue() {
 export async function killNodeAction(node) {
   try {
     await killNode(node);
-    console.log(`⚠️ Node ${node} killed`);
+    console.log(`[WARNING] Node ${node} killed`);
     await refreshNodeStatus();
     updateUI();
   } catch (error) {
@@ -115,7 +115,7 @@ export async function killNodeAction(node) {
 export async function recoverNodeAction(node) {
   try {
     await recoverNode(node);
-    console.log(`✅ Node ${node} recovery initiated`);
+    console.log(`[OK] Node ${node} recovery initiated`);
     await refreshNodeStatus();
     updateUI();
   } catch (error) {
@@ -132,7 +132,7 @@ export async function executeQueryAction(query) {
   }
   
   try {
-    console.log(`📝 Executing query on ${state.selectedNode} with isolation level ${state.selectedIsolationLevel}`);
+    console.log(`[QUERY] Executing query on ${state.selectedNode} with isolation level ${state.selectedIsolationLevel}`);
     
     const response = await executeQuery(
       state.selectedNode,
@@ -140,7 +140,7 @@ export async function executeQueryAction(query) {
       state.selectedIsolationLevel
     );
     
-    console.log('✅ Query executed:', response.data);
+    console.log('[OK] Query executed:', response.data);
     await refreshTransactionLogs();
     updateUI();
     
@@ -166,7 +166,7 @@ export async function executeQueryAction(query) {
 // View Data
 export async function viewNodeData(node) {
   try {
-    console.log(`📊 Fetching data from ${node}...`);
+    console.log(`[DATA] Fetching data from ${node}...`);
     
     const response = await getNodeData(node);
     
@@ -185,7 +185,7 @@ export async function clearLogsAction() {
       await clearLogs();
       state.transactionLogs = [];
       state.replicationQueue = [];
-      console.log('🗑️ Logs cleared');
+      console.log('[CLEAR] Logs cleared');
       updateUI();
     } catch (error) {
       console.error('Error clearing logs:', error);
@@ -197,7 +197,7 @@ export async function clearLogsAction() {
 // Replay Failed Replications
 export async function replayFailedReplications() {
   try {
-    console.log('🔄 Manually triggering replication replay...');
+    console.log('[REPLAY] Manually triggering replication replay...');
     
     const response = await fetch(`${window.location.origin.replace('3000', '5000')}/api/replication/replay`, {
       method: 'POST',
@@ -210,7 +210,7 @@ export async function replayFailedReplications() {
     
     const result = await response.json();
     
-    console.log('✅ Replay completed:', result);
+    console.log('[OK] Replay completed:', result);
     
     // Refresh UI
     await refreshReplicationQueue();
@@ -225,7 +225,7 @@ export async function replayFailedReplications() {
     }
     
   } catch (error) {
-    console.error('❌ Error during replay:', error);
+    console.error('[ERROR] Error during replay:', error);
     showErrorMessage('Failed to replay transactions: ' + error.message);
   }
 }
@@ -284,9 +284,9 @@ function updateTransactionLogsUI() {
       if (log.results && typeof log.results.affectedRows !== 'undefined') {
         const affectedRows = log.results.affectedRows;
         if (affectedRows === 0) {
-          affectedInfo = ` | <span class="affected-rows warning">⚠️ 0 rows affected</span>`;
+          affectedInfo = ` | <span class="affected-rows warning">WARNING: 0 rows affected</span>`;
         } else {
-          affectedInfo = ` | <span class="affected-rows success">✓ ${affectedRows} row(s) affected</span>`;
+          affectedInfo = ` | <span class="affected-rows success">${affectedRows} row(s) affected</span>`;
         }
       }
       
@@ -424,7 +424,7 @@ window.executeInsert = async function() {
     const response = await executeQuery('node0', query, 'READ_COMMITTED');
     document.getElementById('insertResult').innerHTML = `
       <div class="success-box">
-        <strong>✅ Insert Successful</strong><br>
+        <strong>Insert Successful</strong><br>
         Inserted to Node 0 (Master) and replicated to ${date < '1997-01-01' ? 'Node 1 (Pre-1997)' : 'Node 2 (1997+)'}<br>
         Trans ID: ${transId}, Account: ${accountId}, Date: ${date}, Amount: ${amount}, Balance: ${balance}
       </div>
@@ -440,7 +440,7 @@ window.executeInsert = async function() {
     await refreshTransactionLogs();
   } catch (error) {
     document.getElementById('insertResult').innerHTML = `
-      <div class="error-box">❌ Insert Failed: ${error.message}</div>
+      <div class="error-box">Insert Failed: ${error.message}</div>
     `;
   }
 };
@@ -520,7 +520,7 @@ window.executeUpdate = async function() {
     
     document.getElementById('updateResult').innerHTML = `
       <div class="success-box">
-        <strong>✅ Update Successful</strong><br>
+        <strong>Update Successful</strong><br>
         Updated Trans ID: ${transId}<br>
         ${accountId ? `New Account ID: ${accountId}<br>` : ''}
         ${date ? `New Date: ${date}<br>` : ''}
@@ -540,7 +540,7 @@ window.executeUpdate = async function() {
     await refreshTransactionLogs();
   } catch (error) {
     document.getElementById('updateResult').innerHTML = `
-      <div class="error-box">❌ Update Failed: ${error.message}</div>
+      <div class="error-box">Update Failed: ${error.message}</div>
     `;
   }
 };
@@ -598,7 +598,7 @@ window.executeDelete = async function() {
     const response = await executeQuery('node0', query, 'READ_COMMITTED');
     document.getElementById('deleteResult').innerHTML = `
       <div class="success-box">
-        <strong>✅ Delete Successful</strong><br>
+        <strong>Delete Successful</strong><br>
         Deleted Trans ID: ${transId} from Node 0 (Master)<br>
         Changes replicated to appropriate fragment node.
       </div>
@@ -612,7 +612,7 @@ window.executeDelete = async function() {
     await refreshTransactionLogs();
   } catch (error) {
     document.getElementById('deleteResult').innerHTML = `
-      <div class="error-box">❌ Delete Failed: ${error.message}</div>
+      <div class="error-box">Delete Failed: ${error.message}</div>
     `;
   }
 };

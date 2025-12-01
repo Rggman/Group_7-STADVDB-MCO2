@@ -239,7 +239,7 @@ async function replicateWrite(sourceNode, query, isolationLevel) {
     const insertIdMatch = /VALUES\s*\(\s*(\d+)/i.exec(query);
     if (insertIdMatch) {
       transId = parseInt(insertIdMatch[1], 10);
-      console.log(`🔑 Extracted trans_id from INSERT: ${transId}`);
+      console.log(`[INSERT] Extracted trans_id: ${transId}`);
     }
   }
   // For UPDATE/DELETE: extract from WHERE clause
@@ -259,13 +259,13 @@ async function replicateWrite(sourceNode, query, isolationLevel) {
     const valuesMatch = /VALUES\s*\([^)]*'(\d{4}-\d{2}-\d{2})'[^)]*\)/i.exec(query);
     if (valuesMatch) {
       recordDate = new Date(valuesMatch[1]);
-      console.log(`📅 Extracted date from INSERT: ${valuesMatch[1]} => ${recordDate}`);
+      console.log(`[INSERT] Extracted date: ${valuesMatch[1]} => ${recordDate}`);
     } else {
       // Pattern 2: Find any date-like string after newdate/trans_date column
       const dateMatch = /(?:trans_date|newdate)[^']*'([^']+)'/i.exec(query);
       if (dateMatch) {
         recordDate = new Date(dateMatch[1]);
-        console.log(`📅 Extracted date (fallback): ${dateMatch[1]} => ${recordDate}`);
+        console.log(`[INSERT] Extracted date (fallback): ${dateMatch[1]} => ${recordDate}`);
       }
     }
   }
@@ -283,21 +283,21 @@ async function replicateWrite(sourceNode, query, isolationLevel) {
     }
   }
   
-  console.log(`🔍 Replication decision - Source: ${sourceNode}, Date: ${recordDate}, Boundary: ${FRAG_BOUNDARY}`);
+  console.log(`[REPLICATION] Decision - Source: ${sourceNode}, Date: ${recordDate}, Boundary: ${FRAG_BOUNDARY}`);
 
   const targets = [];
   if (sourceNode === 'node0') {
     if (recordDate) {
       if (recordDate < FRAG_BOUNDARY) {
         targets.push('node1');
-        console.log(`✅ Replicating to node1 (pre-1997): ${recordDate} < ${FRAG_BOUNDARY}`);
+        console.log(`[TARGET] Replicating to node1 (pre-1997): ${recordDate} < ${FRAG_BOUNDARY}`);
       } else {
         targets.push('node2');
-        console.log(`✅ Replicating to node2 (1997+): ${recordDate} >= ${FRAG_BOUNDARY}`);
+        console.log(`[TARGET] Replicating to node2 (1997+): ${recordDate} >= ${FRAG_BOUNDARY}`);
       }
     } else {
       // Fallback if we cannot determine date: replicate to both fragments
-      console.log(`⚠️  Could not determine date, replicating to both fragments`);
+      console.log(`[WARNING] Could not determine date, replicating to both fragments`);
       targets.push('node1', 'node2');
     }
   } else {
@@ -343,7 +343,7 @@ async function replicateWrite(sourceNode, query, isolationLevel) {
   }
   
   // Step 2: Replicate to targets (only those we successfully locked)
-  console.log(`📤 Starting replication to targets: [${lockResult.lockedNodes.join(', ')}]`);
+  console.log(`[REPLICATION] Starting to targets: [${lockResult.lockedNodes.join(', ')}]`);
   
   for (const tgt of lockResult.lockedNodes) {
     if (!pools[tgt]) continue;
@@ -354,7 +354,7 @@ async function replicateWrite(sourceNode, query, isolationLevel) {
         throw new Error(`Node ${tgt} is offline (simulated failure)`);
       }
       
-      console.log(`🔄 Replicating to ${tgt}...`);
+      console.log(`[REPLICATION] Replicating to ${tgt}...`);
       const conn = await pools[tgt].getConnection();
       if (isolationLevel) {
         const iso = String(isolationLevel).replace(/_/g, ' ');
@@ -363,11 +363,11 @@ async function replicateWrite(sourceNode, query, isolationLevel) {
       await conn.query(query);
       conn.release();
       entry.status = 'replicated';
-      console.log(`✅ Successfully replicated to ${tgt}`);
+      console.log(`[SUCCESS] Replicated to ${tgt}`);
     } catch (e) {
       entry.status = 'failed';
       entry.error = e.message;
-      console.error(`❌ Replication to ${tgt} FAILED: ${e.message}`);
+      console.error(`[ERROR] Replication to ${tgt} FAILED: ${e.message}`);
       console.error(`Query was: ${query}`);
     }
     replicationQueue.push(entry);
@@ -399,7 +399,7 @@ async function initializePools() {
 // Test connections to all nodes
 async function testAllConnections() {
   const nodes = ['node0', 'node1', 'node2'];
-  console.log('\n🔍 Testing database connections...\n');
+  console.log('\n[TEST] Testing database connections...\n');
   
   for (const node of nodes) {
     try {
@@ -415,14 +415,14 @@ async function testAllConnections() {
       if (tableInfo[0].count > 0) {
         // Get row count
         const [rowCount] = await connection.query('SELECT COUNT(*) as total FROM trans');
-        console.log(`✅ ${node.toUpperCase()}: Connected | trans table exists with ${rowCount[0].total} rows`);
+        console.log(`[OK] ${node.toUpperCase()}: Connected | trans table exists with ${rowCount[0].total} rows`);
       } else {
-        console.log(`⚠️  ${node.toUpperCase()}: Connected | ❌ trans table NOT found`);
+        console.log(`[WARN] ${node.toUpperCase()}: Connected | trans table NOT found`);
       }
       
       connection.release();
     } catch (error) {
-      console.error(`❌ ${node.toUpperCase()}: Connection failed - ${error.message}`);
+      console.error(`[ERROR] ${node.toUpperCase()}: Connection failed - ${error.message}`);
     }
   }
   console.log('');
@@ -631,7 +631,7 @@ app.post('/api/nodes/kill', (req, res) => {
     nodeStatus[node].status = 'offline';
     nodeStatus[node].failureTime = new Date();
     
-    console.log(`🔴 KILLING NODE: ${node} - Simulated failure activated`);
+    console.log(`[FAILURE] KILLING NODE: ${node} - Simulated failure activated`);
     
     res.json({
       message: `${node} has been killed (simulated failure)`,
@@ -652,7 +652,7 @@ app.post('/api/nodes/recover', async (req, res) => {
       simulatedFailures[node] = false;
       delete nodeStatus[node].failureTime;
       
-      console.log(`🟢 RECOVERING NODE: ${node} - Simulated failure removed`);
+      console.log(`[RECOVERY] RECOVERING NODE: ${node} - Simulated failure removed`);
       
       // Check health after removing failure simulation
       await checkNodeHealth();
@@ -680,17 +680,17 @@ app.get('/api/data/:node', async (req, res) => {
     updated_since
   } = req.query;
 
-  console.log(`\n📊 [DATA REQUEST] Node: ${node}, Table: ${table}, Filter: ${filter}`);
+  console.log(`\n[DATA REQUEST] Node: ${node}, Table: ${table}, Filter: ${filter}`);
 
   if (!pools[node]) {
-    console.error(`❌ Invalid node: ${node}`);
+    console.error(`[ERROR] Invalid node: ${node}`);
     return res.status(400).json({ error: 'Invalid node' });
   }
 
   try {
-    console.log(`🔌 Getting connection for ${node}...`);
-    const connection = await pools[node].getConnection();
-    console.log(`✅ Connection obtained`);
+    console.log(`[CONNECTION] Getting connection for ${node}...`);
+    connection = await pools[node].getConnection();
+    console.log(`[OK] Connection obtained`);
     
     let baseQuery = `
       SELECT 
@@ -744,12 +744,12 @@ app.get('/api/data/:node', async (req, res) => {
     }
     
     const finalQuery = `${baseQuery} ${whereClause} ${orderClause} LIMIT ${parseInt(limit)}`;
-    console.log(`🔍 Querying: ${finalQuery}`);
+    console.log(`[QUERY] Querying: ${finalQuery}`);
     
     const [results] = await connection.query(finalQuery, params);
     connection.release();
 
-    console.log(`✅ Query successful. Results: ${results.length} rows`);
+    console.log(`[OK] Query successful. Results: ${results.length} rows`);
 
     // Mark recently updated records for highlighting
     const recentTransIds = getRecentlyUpdatedTransIds();
@@ -767,8 +767,8 @@ app.get('/api/data/:node', async (req, res) => {
       recent_updates_available: recentTransIds.length > 0
     });
   } catch (error) {
-    console.error(`❌ Error fetching data from ${node}:`, error.message);
-    console.error(`📋 Error details:`, error);
+    console.error(`[ERROR] Error fetching data from ${node}:`, error.message);
+    console.error(`[ERROR] Error details:`, error);
     res.status(500).json({ error: error.message, details: error.sqlMessage || 'Unknown error' });
   }
 });
@@ -813,8 +813,8 @@ async function start() {
   await initializePools();
   
   app.listen(PORT, () => {
-    console.log(`\n🚀 Distributed DB Simulator Backend running on port ${PORT}`);
-    console.log(`📊 Health check: http://localhost:${PORT}/health`);
+    console.log(`\n[SERVER] Distributed DB Simulator Backend running on port ${PORT}`);
+    console.log(`[SERVER] Health check: http://localhost:${PORT}/health`);
     console.log(`\nNode Configuration:`);
     console.log(`  - Node 0 (Master): ${dbConfig.node0.host}:${dbConfig.node0.port}`);
     console.log(`  - Node 1 (Fragment A): ${dbConfig.node1.host}:${dbConfig.node1.port}`);
