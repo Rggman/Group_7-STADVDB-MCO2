@@ -41,8 +41,8 @@ jobs:
             echo "Building Frontend..."
             cd frontend
             npm install
-            # USE SPECIFIC OPEN PORT (Change 60110 to your actual backend port)
-            export VITE_API_URL="http://ccscloud.dlsu.edu.ph:3001/api"
+            # USE RELATIVE PATH (Best for firewalls)
+            export VITE_API_URL="/api"
             npm run build
             cd ..
             
