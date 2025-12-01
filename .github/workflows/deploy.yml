@@ -23,6 +23,7 @@ jobs:
           script: |
             # --- CONFIGURATION ---
             REPO_DIR=~/app-repo
+            BACKEND_DIR=$REPO_DIR/backend
             PUBLIC_DIR=/var/www/db-frontend
             
             # --- DEPLOYMENT ---
@@ -32,10 +33,10 @@ jobs:
             git pull origin main
             
             # 2. Backend
-            echo "Deploying Backend..."
-            cd backend
+            echo "Deploying Backend from $BACKEND_DIR..."
+            cd $BACKEND_DIR
             npm install
-            cd ..
+            cd $REPO_DIR
             
             # 3. Frontend
             echo "Building Frontend..."
@@ -51,5 +52,10 @@ jobs:
             mkdir -p $PUBLIC_DIR
             cp -r frontend/dist/* $PUBLIC_DIR/
             
-            # 5. Restart
-            pm2 restart all
+            # 5. Restart PM2 from backend directory
+            cd $BACKEND_DIR
+            pm2 delete all || true
+            pm2 start server.js --name backend-server
+            pm2 save
+
+            # TEst COmmit
