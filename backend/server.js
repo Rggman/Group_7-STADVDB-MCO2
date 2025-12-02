@@ -24,11 +24,6 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Prevent caching for all API routes
-app.use((req, res, next) => {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-  next();
-});
 
 // Database Configuration
 const dbConfig = {
