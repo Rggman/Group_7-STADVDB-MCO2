@@ -18,6 +18,10 @@ export const recoverNode = (node) => apiClient.post('/nodes/recover', { node });
 export const executeQuery = (node, query, isolationLevel) =>
   apiClient.post('/query/execute', { node, query, isolationLevel });
 
+// Auto Query Execution (automatic node selection with failover)
+export const autoExecuteQuery = (query, isolationLevel) =>
+  apiClient.post('/query/auto-execute', { query, isolationLevel });
+
 // Data Retrieval
 export const getNodeData = (node, table = 'trans', filter = 'all', additionalParams = {}) =>
   apiClient.get(`/data/${node}`, { 

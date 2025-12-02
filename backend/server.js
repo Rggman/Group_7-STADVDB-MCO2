@@ -487,6 +487,137 @@ function abortTransaction(txnId) {
 }
 
 // ============================================================================
+// AUTOMATIC NODE SELECTION
+// ============================================================================
+
+const FRAG_BOUNDARY_DATE = '1997-01-01';
+
+/**
+ * Extract date from INSERT query
+ * Looks for patterns like: VALUES(..., '1996-05-15', ...) or INSERT ... newdate = '1996-05-15'
+ */
+function extractDateFromInsertQuery(query) {
+  // Match date in VALUES clause - look for date-like patterns
+  const valuesMatch = query.match(/VALUES\s*\([^)]*'(\d{4}-\d{2}-\d{2})'[^)]*\)/i);
+  if (valuesMatch) {
+    return valuesMatch[1];
+  }
+  
+  // Match SET newdate = 'YYYY-MM-DD'
+  const setMatch = query.match(/newdate\s*=\s*'(\d{4}-\d{2}-\d{2})'/i);
+  if (setMatch) {
+    return setMatch[1];
+  }
+  
+  return null;
+}
+
+/**
+ * Determine the primary node for a write operation based on:
+ * 1. For UPDATE/DELETE: Look up the record's date from an available node
+ * 2. For INSERT: Extract date from the query
+ * 
+ * Fragmentation rules:
+ * - node1: Records with date < 1997-01-01
+ * - node2: Records with date >= 1997-01-01
+ * - node0: Master node (stores all data)
+ */
+async function determinePrimaryNode(query) {
+  const upper = query.trim().toUpperCase();
+  const transId = parseTransId(query);
+  
+  // For INSERT, extract date from query
+  if (upper.startsWith('INSERT')) {
+    const insertDate = extractDateFromInsertQuery(query);
+    if (insertDate) {
+      const targetNode = insertDate < FRAG_BOUNDARY_DATE ? 'node1' : 'node2';
+      console.log(`[AUTO-NODE] INSERT detected, date=${insertDate}, target=${targetNode}`);
+      return { primaryNode: targetNode, recordDate: insertDate, reason: 'date_from_insert' };
+    }
+    // If no date found, default to master
+    console.log(`[AUTO-NODE] INSERT without parseable date, defaulting to node0`);
+    return { primaryNode: 'node0', recordDate: null, reason: 'insert_no_date' };
+  }
+  
+  // For UPDATE/DELETE, we need to look up the record's date
+  if ((upper.startsWith('UPDATE') || upper.startsWith('DELETE')) && transId) {
+    // Try to get the record date from any available node
+    const nodesToTry = ['node0', 'node1', 'node2'];
+    
+    for (const node of nodesToTry) {
+      if (simulatedFailures[node] || !pools[node]) continue;
+      
+      try {
+        const conn = await pools[node].getConnection();
+        const [rows] = await conn.query(
+          'SELECT DATE_FORMAT(DATE(newdate), "%Y-%m-%d") as date_only FROM trans WHERE trans_id = ?', 
+          [transId]
+        );
+        conn.release();
+        
+        if (rows.length > 0) {
+          const recordDate = rows[0].date_only;
+          const targetNode = recordDate < FRAG_BOUNDARY_DATE ? 'node1' : 'node2';
+          console.log(`[AUTO-NODE] Found record in ${node}: trans_id=${transId}, date=${recordDate}, target=${targetNode}`);
+          return { primaryNode: targetNode, recordDate, reason: 'date_lookup', lookupNode: node };
+        }
+      } catch (e) {
+        console.log(`[AUTO-NODE] Could not query ${node}: ${e.message}`);
+      }
+    }
+    
+    // Record not found in any node
+    console.log(`[AUTO-NODE] Record not found for trans_id=${transId}, defaulting to node0`);
+    return { primaryNode: 'node0', recordDate: null, reason: 'record_not_found' };
+  }
+  
+  // For SELECT queries, prefer master node
+  console.log(`[AUTO-NODE] SELECT or unknown query type, defaulting to node0`);
+  return { primaryNode: 'node0', recordDate: null, reason: 'select_or_unknown' };
+}
+
+/**
+ * Get the best available node when the primary is offline
+ * Fallback order:
+ * - If primary is node1/node2 and offline -> try node0 (master has all data)
+ * - If node0 is offline -> try the appropriate fragment node
+ */
+function getAvailableNode(primaryNode, recordDate) {
+  if (!simulatedFailures[primaryNode]) {
+    return { node: primaryNode, isFallback: false };
+  }
+  
+  console.log(`[AUTO-NODE] Primary node ${primaryNode} is offline, finding fallback...`);
+  
+  // If a fragment is down, fall back to master
+  if (primaryNode === 'node1' || primaryNode === 'node2') {
+    if (!simulatedFailures['node0']) {
+      console.log(`[AUTO-NODE] Falling back to node0 (master)`);
+      return { node: 'node0', isFallback: true, fallbackReason: `${primaryNode} offline` };
+    }
+  }
+  
+  // If master is down, try to use the appropriate fragment
+  if (primaryNode === 'node0' && recordDate) {
+    const fragmentNode = recordDate < FRAG_BOUNDARY_DATE ? 'node1' : 'node2';
+    if (!simulatedFailures[fragmentNode]) {
+      console.log(`[AUTO-NODE] Falling back to ${fragmentNode} (fragment)`);
+      return { node: fragmentNode, isFallback: true, fallbackReason: 'node0 offline' };
+    }
+  }
+  
+  // Try any available node
+  for (const node of ['node0', 'node1', 'node2']) {
+    if (!simulatedFailures[node] && pools[node]) {
+      console.log(`[AUTO-NODE] Last resort fallback to ${node}`);
+      return { node, isFallback: true, fallbackReason: 'all_preferred_offline' };
+    }
+  }
+  
+  return { node: null, isFallback: false, error: 'All nodes offline' };
+}
+
+// ============================================================================
 // TWO-PHASE COMMIT (2PC) PROTOCOL
 // ============================================================================
 
@@ -830,7 +961,191 @@ app.get('/api/nodes/status', async (req, res) => {
   }
 });
 
-// 4. Execute Query on Specific Node
+// 3.5 Auto-Execute Query (Automatic Node Selection)
+app.post('/api/query/auto-execute', async (req, res) => {
+  const { query, isolationLevel } = req.body;
+  
+  if (!query || !query.trim()) {
+    return res.status(400).json({ error: 'Query is required' });
+  }
+
+  const effectiveIsolation = isolationLevel || 'READ_COMMITTED';
+  const transactionId = uuidv4();
+  
+  console.log(`\n[AUTO-EXECUTE] Starting automatic query execution...`);
+  console.log(`[AUTO-EXECUTE] Query: ${query.substring(0, 100)}...`);
+  
+  try {
+    // Step 1: Determine the primary node for this query
+    const nodeSelection = await determinePrimaryNode(query);
+    console.log(`[AUTO-EXECUTE] Node selection result:`, nodeSelection);
+    
+    // Step 2: Get an available node (handles failover)
+    const availability = getAvailableNode(nodeSelection.primaryNode, nodeSelection.recordDate);
+    
+    if (!availability.node) {
+      return res.status(503).json({
+        error: 'All database nodes are offline',
+        transactionId,
+        nodeSelection,
+        message: 'Cannot execute query - no available nodes'
+      });
+    }
+    
+    const targetNode = availability.node;
+    console.log(`[AUTO-EXECUTE] Target node: ${targetNode} (fallback: ${availability.isFallback})`);
+    
+    // Step 3: Execute on the target node (reuse existing logic)
+    // Write-Ahead Log: Log BEFORE execution
+    const logEntry = writeAheadLog(transactionId, targetNode, query, effectiveIsolation);
+    logEntry.autoRouted = true;
+    logEntry.nodeSelection = nodeSelection;
+    logEntry.availability = availability;
+    
+    // Persist WAL to disk immediately
+    await persistLogs();
+
+    let connection = null;
+    const isWrite = isWriteQuery(query);
+    const transId = parseTransId(query);
+    
+    connection = await pools[targetNode].getConnection();
+    
+    // Start transaction tracking
+    startTransaction(transactionId, targetNode, effectiveIsolation);
+    const txn = transactions[transactionId];
+    
+    // ISOLATION LEVEL SPECIFIC LOCKING
+    if (isWrite && transId) {
+      const lockResult = await acquireLock(transactionId, transId, 'write', effectiveIsolation);
+      
+      if (!lockResult.success) {
+        abortTransaction(transactionId);
+        connection.release();
+        
+        logEntry.status = 'timeout';
+        logEntry.error = lockResult.reason;
+        logEntry.endTime = new Date();
+        
+        return res.status(408).json({
+          transactionId,
+          error: `Write timeout: ${lockResult.reason}`,
+          isolationLevel: effectiveIsolation,
+          targetNode,
+          logEntry
+        });
+      }
+      
+      txn.writeSet.add(transId);
+    } else if (!isWrite && transId) {
+      if (effectiveIsolation === 'REPEATABLE_READ' && txn.snapshot[transId]) {
+        const cachedResults = txn.snapshot[transId];
+        
+        logEntry.status = 'committed';
+        logEntry.endTime = new Date();
+        logEntry.results = cachedResults;
+        logEntry.snapshotUsed = true;
+        
+        connection.release();
+        
+        return res.json({
+          transactionId,
+          results: cachedResults,
+          snapshotUsed: true,
+          targetNode,
+          autoRouted: true,
+          nodeSelection,
+          logEntry
+        });
+      }
+      
+      const lockResult = await acquireLock(transactionId, transId, 'read', effectiveIsolation);
+      
+      if (!lockResult.success) {
+        abortTransaction(transactionId);
+        connection.release();
+        
+        logEntry.status = 'timeout';
+        logEntry.error = lockResult.reason;
+        logEntry.endTime = new Date();
+        
+        return res.status(408).json({
+          transactionId,
+          error: `Read timeout: ${lockResult.reason}`,
+          isolationLevel: effectiveIsolation,
+          targetNode,
+          logEntry
+        });
+      }
+      
+      txn.readSet.add(transId);
+    }
+
+    // Execute query
+    const [results] = await connection.query(query);
+    
+    // Store snapshot for REPEATABLE_READ
+    if (!isWrite && transId && effectiveIsolation === 'REPEATABLE_READ') {
+      if (!txn.snapshot[transId]) {
+        txn.snapshot[transId] = results;
+      }
+    }
+
+    logEntry.status = 'committed';
+    logEntry.endTime = new Date();
+    logEntry.results = results;
+    logEntry.readSet = Array.from(txn.readSet);
+    logEntry.writeSet = Array.from(txn.writeSet);
+    
+    // Replicate write to other nodes
+    const replicationResults = await replicateWrite(targetNode, query);
+    logEntry.replication = replicationResults.map(r => ({ target: r.target, status: r.status }));
+
+    // ISOLATION LEVEL SPECIFIC LOCK RELEASE
+    if (effectiveIsolation === 'READ_COMMITTED' && transId) {
+      releaseLock(transactionId, transId, effectiveIsolation);
+    }
+    
+    commitTransaction(transactionId);
+    connection.release();
+    
+    await persistLogs();
+
+    res.json({
+      transactionId,
+      results,
+      targetNode,
+      autoRouted: true,
+      nodeSelection,
+      isFallback: availability.isFallback,
+      fallbackReason: availability.fallbackReason,
+      replication: logEntry.replication,
+      logEntry
+    });
+    
+  } catch (error) {
+    console.error(`[AUTO-EXECUTE] Error:`, error.message);
+    
+    const logEntry = {
+      transactionId,
+      status: 'failed',
+      error: error.message,
+      endTime: new Date()
+    };
+    transactionLog.push(logEntry);
+    
+    abortTransaction(transactionId);
+    await persistLogs();
+
+    res.status(500).json({
+      transactionId,
+      error: error.message,
+      logEntry
+    });
+  }
+});
+
+// 4. Execute Query on Specific Node (Manual selection - kept for backward compatibility)
 app.post('/api/query/execute', async (req, res) => {
   const { node, query, isolationLevel } = req.body;
   

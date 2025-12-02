@@ -2,7 +2,8 @@ import {
   getNodeStatus, 
   killNode, 
   recoverNode, 
-  executeQuery, 
+  executeQuery,
+  autoExecuteQuery,
   getNodeData,
   getTransactionLogs,
   getReplicationQueue,
@@ -125,41 +126,71 @@ export async function recoverNodeAction(node) {
 }
 
 // Query Execution
-export async function executeQueryAction(query) {
+export async function executeQueryAction(query, useAutoRouting = true) {
   if (!query.trim()) {
     showErrorMessage('Query cannot be empty');
     return;
   }
   
+  const isWrite = /^\s*(UPDATE|INSERT|DELETE)/i.test(query);
+  
   try {
-    console.log(`[QUERY] Executing query on ${state.selectedNode} with isolation level ${state.selectedIsolationLevel}`);
+    let response;
     
-    const response = await executeQuery(
-      state.selectedNode,
-      query,
-      state.selectedIsolationLevel
-    );
+    // Use auto-routing for write operations (or if explicitly enabled)
+    if (isWrite && useAutoRouting) {
+      console.log(`[QUERY] Auto-executing write query with isolation level ${state.selectedIsolationLevel}`);
+      response = await autoExecuteQuery(query, state.selectedIsolationLevel);
+      
+      if (response.data.autoRouted) {
+        const targetInfo = response.data.isFallback 
+          ? `${response.data.targetNode} (fallback: ${response.data.fallbackReason})`
+          : response.data.targetNode;
+        console.log(`[OK] Query auto-routed to ${targetInfo}`);
+      }
+    } else {
+      // Use manual node selection for SELECT queries or when auto-routing is disabled
+      console.log(`[QUERY] Executing query on ${state.selectedNode} with isolation level ${state.selectedIsolationLevel}`);
+      response = await executeQuery(
+        state.selectedNode,
+        query,
+        state.selectedIsolationLevel
+      );
+    }
     
     console.log('[OK] Query executed:', response.data);
     await refreshTransactionLogs();
     updateUI();
     
-    // Check if it's a write operation and show detailed results
-    const isWrite = /^\s*(UPDATE|INSERT|DELETE)/i.test(query);
+    // Build success message with routing info
+    let successMsg = 'Query executed successfully';
+    
+    if (response.data.autoRouted) {
+      const targetNode = response.data.targetNode;
+      if (response.data.isFallback) {
+        successMsg = `Query routed to ${targetNode.toUpperCase()} (fallback: ${response.data.fallbackReason})`;
+      } else {
+        successMsg = `Query auto-routed to ${targetNode.toUpperCase()}`;
+      }
+    }
     
     if (isWrite && response.data && response.data.results && typeof response.data.results.affectedRows !== 'undefined') {
       const affectedRows = response.data.results.affectedRows;
       if (affectedRows === 0) {
-        showErrorMessage(`Query executed but no rows were affected (0 rows matched the WHERE condition)`);
+        showErrorMessage(`${successMsg} but no rows were affected (0 rows matched the WHERE condition)`);
       } else {
-        showSuccessMessage(`Query executed successfully (${affectedRows} row(s) affected)`);
+        showSuccessMessage(`${successMsg} (${affectedRows} row(s) affected)`);
       }
     } else {
-      showSuccessMessage('Query executed successfully');
+      showSuccessMessage(successMsg);
     }
+    
+    return response.data;
   } catch (error) {
     console.error('Error executing query:', error);
-    showErrorMessage('Query execution failed: ' + error.response?.data?.error || error.message);
+    const errorMsg = error.response?.data?.error || error.message;
+    showErrorMessage('Query execution failed: ' + errorMsg);
+    return null;
   }
 }
 
@@ -371,14 +402,13 @@ window.showOperationTab = function(tabName) {
 
 // INSERT Operation
 window.executeInsert = async function() {
-  const targetNode = document.getElementById('insertTargetNode').value;
   const transId = document.getElementById('insertTransId').value;
   const accountId = document.getElementById('insertAccountId').value;
   const date = document.getElementById('insertDate').value;
   const amount = document.getElementById('insertAmount').value;
   const balance = document.getElementById('insertBalance').value;
   
-  if (!targetNode || !transId || !accountId || !date || !amount || !balance) {
+  if (!transId || !accountId || !date || !amount || !balance) {
     showErrorMessage('Please fill in all required fields');
     return;
   }
@@ -386,11 +416,15 @@ window.executeInsert = async function() {
   const query = `INSERT INTO trans (trans_id, account_id, newdate, amount, balance) VALUES (${transId}, ${accountId}, '${date}', ${amount}, ${balance})`;
   
   try {
-    const response = await executeQuery(targetNode, query, 'READ_COMMITTED');
+    const response = await autoExecuteQuery(query, 'READ_COMMITTED');
+    const targetNode = response.data.targetNode || 'auto-selected';
+    const isFallback = response.data.isFallback;
+    const fallbackInfo = isFallback ? ` (fallback: ${response.data.fallbackReason})` : '';
+    
     document.getElementById('insertResult').innerHTML = `
       <div class="success-box">
         <strong>Insert Successful</strong><br>
-        Executed on ${targetNode.toUpperCase()} and replicated based on fragmentation rules<br>
+        Auto-routed to ${targetNode.toUpperCase()}${fallbackInfo}<br>
         Trans ID: ${transId}, Account: ${accountId}, Date: ${date}, Amount: ${amount}, Balance: ${balance}
       </div>
     `;
@@ -404,8 +438,9 @@ window.executeInsert = async function() {
     
     await refreshTransactionLogs();
   } catch (error) {
+    const errorMsg = error.response?.data?.error || error.message;
     document.getElementById('insertResult').innerHTML = `
-      <div class="error-box">Insert Failed: ${error.message}</div>
+      <div class="error-box">Insert Failed: ${errorMsg}</div>
     `;
   }
 };
@@ -449,15 +484,14 @@ window.loadRecordForUpdate = async function() {
 
 // UPDATE Operation - Execute
 window.executeUpdate = async function() {
-  const targetNode = document.getElementById('updateTargetNode').value;
   const transId = document.getElementById('updateTransId').value;
   const accountId = document.getElementById('updateAccountId').value;
   const date = document.getElementById('updateDate').value;
   const amount = document.getElementById('updateAmount').value;
   const balance = document.getElementById('updateBalance').value;
   
-  if (!targetNode || !transId) {
-    showErrorMessage('Please select target node and enter a Transaction ID');
+  if (!transId) {
+    showErrorMessage('Please enter a Transaction ID');
     return;
   }
   
@@ -475,25 +509,28 @@ window.executeUpdate = async function() {
   const query = `UPDATE trans SET ${updates.join(', ')} WHERE trans_id = ${transId}`;
   
   try {
-    const response = await executeQuery(targetNode, query, 'READ_COMMITTED');
+    const response = await autoExecuteQuery(query, 'READ_COMMITTED');
+    const targetNode = response.data.targetNode || 'auto-selected';
+    const isFallback = response.data.isFallback;
+    const fallbackInfo = isFallback ? ` (fallback: ${response.data.fallbackReason})` : '';
     
     let fragmentNote = '';
     if (date) {
       fragmentNote = date < '1997-01-01' ? 
-        '<br><strong>Note:</strong> Record moved to Node 1 fragment (Pre-1997)' : 
-        '<br><strong>Note:</strong> Record moved to Node 2 fragment (1997+)';
+        '<br><strong>Note:</strong> Record belongs to Node 1 fragment (Pre-1997)' : 
+        '<br><strong>Note:</strong> Record belongs to Node 2 fragment (1997+)';
     }
     
     document.getElementById('updateResult').innerHTML = `
       <div class="success-box">
         <strong>Update Successful</strong><br>
-        Executed on ${targetNode.toUpperCase()}<br>
+        Auto-routed to ${targetNode.toUpperCase()}${fallbackInfo}<br>
         Updated Trans ID: ${transId}<br>
         ${accountId ? `New Account ID: ${accountId}<br>` : ''}
         ${date ? `New Date: ${date}<br>` : ''}
         ${amount ? `New Amount: ${amount}<br>` : ''}
         ${balance ? `New Balance: ${balance}<br>` : ''}
-        Changes replicated to appropriate fragment node.${fragmentNote}
+        Changes replicated automatically.${fragmentNote}
       </div>
     `;
     
@@ -506,8 +543,9 @@ window.executeUpdate = async function() {
     
     await refreshTransactionLogs();
   } catch (error) {
+    const errorMsg = error.response?.data?.error || error.message;
     document.getElementById('updateResult').innerHTML = `
-      <div class="error-box">Update Failed: ${error.message}</div>
+      <div class="error-box">Update Failed: ${errorMsg}</div>
     `;
   }
 };
@@ -546,12 +584,11 @@ window.loadRecordForDelete = async function() {
 
 // DELETE Operation - Execute
 window.executeDelete = async function() {
-  const targetNode = document.getElementById('deleteTargetNode').value;
   const transId = document.getElementById('deleteTransId').value;
   const confirmed = document.getElementById('deleteConfirm').checked;
   
-  if (!targetNode || !transId) {
-    showErrorMessage('Please select a target node and enter a Transaction ID');
+  if (!transId) {
+    showErrorMessage('Please enter a Transaction ID');
     return;
   }
   
@@ -563,12 +600,17 @@ window.executeDelete = async function() {
   const query = `DELETE FROM trans WHERE trans_id = ${transId}`;
   
   try {
-    const response = await executeQuery(targetNode, query, 'READ_COMMITTED');
+    const response = await autoExecuteQuery(query, 'READ_COMMITTED');
+    const targetNode = response.data.targetNode || 'auto-selected';
+    const isFallback = response.data.isFallback;
+    const fallbackInfo = isFallback ? ` (fallback: ${response.data.fallbackReason})` : '';
+    
     document.getElementById('deleteResult').innerHTML = `
       <div class="success-box">
         <strong>Delete Successful</strong><br>
-        Deleted Trans ID: ${transId} from ${targetNode.toUpperCase()}<br>
-        Changes replicated based on fragmentation rules.
+        Deleted Trans ID: ${transId}<br>
+        Auto-routed to ${targetNode.toUpperCase()}${fallbackInfo}<br>
+        Changes replicated automatically.
       </div>
     `;
     
@@ -579,8 +621,9 @@ window.executeDelete = async function() {
     
     await refreshTransactionLogs();
   } catch (error) {
+    const errorMsg = error.response?.data?.error || error.message;
     document.getElementById('deleteResult').innerHTML = `
-      <div class="error-box">Delete Failed: ${error.message}</div>
+      <div class="error-box">Delete Failed: ${errorMsg}</div>
     `;
   }
 };
