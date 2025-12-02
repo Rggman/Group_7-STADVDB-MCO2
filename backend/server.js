@@ -3,8 +3,15 @@ import cors from 'cors';
 import mysql from 'mysql2/promise';
 import { v4 as uuidv4 } from 'uuid';
 import dotenv from 'dotenv';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 //This is for testing
 dotenv.config();
+
+// Get __dirname equivalent in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 // test tesing
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -102,6 +109,84 @@ let replicationQueue = [];
 
 // Transaction Log
 let transactionLog = [];
+
+// Log file paths for persistence
+const LOG_FILE = path.join(__dirname, 'transaction_log.json');
+const REPLICATION_QUEUE_FILE = path.join(__dirname, 'replication_queue.json');
+
+// Recovery lock tracking
+let recoveryInProgress = {
+  node0: false,
+  node1: false,
+  node2: false
+};
+
+// ============================================================================
+// LOG PERSISTENCE - Write-Ahead Logging (WAL)
+// ============================================================================
+
+/**
+ * Load persisted logs from disk on startup
+ */
+async function loadPersistedLogs() {
+  try {
+    // Load transaction log
+    const logData = await fs.readFile(LOG_FILE, 'utf8');
+    const logs = JSON.parse(logData);
+    transactionLog.push(...logs);
+    console.log(`[RECOVERY] Loaded ${logs.length} transactions from disk`);
+  } catch (error) {
+    console.log('[RECOVERY] No existing transaction log found (starting fresh)');
+  }
+  
+  try {
+    // Load replication queue
+    const queueData = await fs.readFile(REPLICATION_QUEUE_FILE, 'utf8');
+    const queue = JSON.parse(queueData);
+    replicationQueue.push(...queue);
+    console.log(`[RECOVERY] Loaded ${queue.length} replication entries from disk`);
+  } catch (error) {
+    console.log('[RECOVERY] No existing replication queue found (starting fresh)');
+  }
+}
+
+/**
+ * Persist logs to disk (called after each transaction)
+ */
+async function persistLogs() {
+  try {
+    // Keep only last 10000 entries to prevent file bloat
+    const logsToSave = transactionLog.slice(-10000);
+    const queueToSave = replicationQueue.slice(-10000);
+    
+    await Promise.all([
+      fs.writeFile(LOG_FILE, JSON.stringify(logsToSave, null, 2)),
+      fs.writeFile(REPLICATION_QUEUE_FILE, JSON.stringify(queueToSave, null, 2))
+    ]);
+  } catch (error) {
+    console.error('[ERROR] Failed to persist logs:', error.message);
+  }
+}
+
+/**
+ * Write-Ahead Log: Log transaction BEFORE execution
+ */
+function writeAheadLog(transactionId, node, query, isolationLevel) {
+  const walEntry = {
+    transactionId,
+    node,
+    query,
+    isolationLevel,
+    startTime: new Date(),
+    status: 'pending', // Will be updated to 'committed' or 'aborted'
+    walLogged: true
+  };
+  
+  transactionLog.push(walEntry);
+  console.log(`[WAL] Transaction ${transactionId} logged BEFORE execution`);
+  
+  return walEntry;
+}
 
 // ============================================================================
 // CUSTOM APPLICATION-LEVEL LOCK MANAGER (NOT using MySQL built-in locking)
@@ -225,7 +310,7 @@ async function acquireLock(txnId, transId, lockType, isolationLevel) {
     }
     
   } else if (lockType === 'read') {
-    // READ_COMMITTED: No read locks needed
+    // READ_COMMITTED: Acquire short read lock (released immediately after query)
     if (isolationLevel === 'READ_COMMITTED') {
       // But WAIT for any active writer to commit (prevents dirty reads)
       while (lock.writer && lock.writer !== txnId) {
@@ -239,7 +324,17 @@ async function acquireLock(txnId, transId, lockType, isolationLevel) {
         await new Promise(resolve => setTimeout(resolve, 50));
       }
       
-      console.log(`[${isolationLevel}] Read proceeds (no lock needed) on trans_id=${transId}`);
+      // Acquire short read lock (prevents concurrent writes during read)
+      if (!lock.readers.includes(txnId)) {
+        lock.readers.push(txnId);
+        console.log(`[${isolationLevel}] Short read lock ACQUIRED on trans_id=${transId} by ${txnId}`);
+      }
+      
+      // Track in transaction (will be released immediately after query)
+      if (!transactions[txnId].locks[transId]) {
+        transactions[txnId].locks[transId] = { type: 'read', acquired: Date.now() };
+      }
+      
       return { success: true };
     }
     
@@ -396,10 +491,99 @@ function abortTransaction(txnId) {
   }, 1000);
 }
 
-// Simple write replication utility (eager, same query forwarded to other nodes)
+// ============================================================================
+// TWO-PHASE COMMIT (2PC) PROTOCOL
+// ============================================================================
+
 /**
- * Simple replication: forward write query to appropriate nodes
- * No locking needed - just execute the query
+ * Two-Phase Commit: Ensures atomic replication across nodes
+ * Phase 1: PREPARE - All nodes validate and prepare the transaction
+ * Phase 2: COMMIT or ABORT - All nodes commit or all rollback
+ */
+async function twoPhaseCommit(sourceNode, query, targets) {
+  console.log(`[2PC] Starting for query from ${sourceNode} to [${targets.join(', ')}]`);
+  
+  const connections = [];
+  const prepareResults = [];
+  
+  // PHASE 1: PREPARE on all target nodes
+  console.log(`[2PC] PHASE 1: PREPARE`);
+  
+  for (const target of targets) {
+    try {
+      console.log(`[2PC] Checking target: ${target}, simulatedFailure: ${simulatedFailures[target]}, poolExists: ${!!pools[target]}`);
+      
+      if (simulatedFailures[target]) {
+        prepareResults.push({ target, prepared: false, reason: 'Node offline (simulated failure)' });
+        console.log(`[2PC] ${target} SKIPPED (offline)`);
+        continue;
+      }
+      
+      if (!pools[target]) {
+        prepareResults.push({ target, prepared: false, reason: 'Pool not initialized' });
+        console.error(`[2PC] ${target} PREPARE FAILED: Pool not initialized`);
+        continue;
+      }
+      
+      const conn = await pools[target].getConnection();
+      connections.push({ target, conn });
+      
+      // Start transaction and validate query
+      await conn.query('START TRANSACTION');
+      await conn.query(query);
+      
+      prepareResults.push({ target, prepared: true });
+      console.log(`[2PC] ${target} PREPARED`);
+    } catch (error) {
+      prepareResults.push({ target, prepared: false, reason: error.message });
+      console.log(`[2PC] ${target} PREPARE FAILED: ${error.message}`);
+    }
+  }
+  
+  // Check if all nodes prepared successfully
+  const allPrepared = prepareResults.every(r => r.prepared);
+  
+  // PHASE 2: COMMIT or ABORT
+  console.log(`[2PC] PHASE 2: ${allPrepared ? 'COMMIT' : 'ABORT'}`);
+  
+  if (allPrepared) {
+    // All prepared - commit on all nodes
+    for (const { target, conn } of connections) {
+      try {
+        await conn.query('COMMIT');
+        console.log(`[2PC] ${target} COMMITTED`);
+      } catch (error) {
+        console.error(`[2PC] ${target} COMMIT FAILED: ${error.message}`);
+      } finally {
+        conn.release();
+      }
+    }
+    
+    return { success: true, phase: 'committed', results: prepareResults };
+  } else {
+    // Some nodes failed - abort on all nodes
+    for (const { target, conn } of connections) {
+      try {
+        await conn.query('ROLLBACK');
+        console.log(`[2PC] ${target} ROLLED BACK`);
+      } catch (error) {
+        console.error(`[2PC] ${target} ROLLBACK FAILED: ${error.message}`);
+      } finally {
+        conn.release();
+      }
+    }
+    
+    return { 
+      success: false, 
+      phase: 'aborted',
+      reason: 'One or more nodes failed to prepare',
+      results: prepareResults 
+    };
+  }
+}
+
+/**
+ * Replication using Two-Phase Commit
  */
 async function replicateWrite(sourceNode, query) {
   const upper = query.trim().toUpperCase();
@@ -415,10 +599,14 @@ async function replicateWrite(sourceNode, query) {
   if (transId) {
     try {
       const conn = await pools[sourceNode].getConnection();
-      const [rows] = await conn.query('SELECT newdate FROM trans WHERE trans_id = ?', [transId]);
+      // Get date as formatted string to avoid timezone conversion issues
+      const [rows] = await conn.query('SELECT DATE_FORMAT(DATE(newdate), "%Y-%m-%d") as date_only FROM trans WHERE trans_id = ?', [transId]);
       conn.release();
       if (rows.length) {
-        recordDate = rows[0].newdate instanceof Date ? rows[0].newdate : new Date(rows[0].newdate);
+        recordDate = rows[0].date_only; // This will be a string like '1997-01-01'
+        console.log(`[REPLICATION] Fetched from ${sourceNode}: trans_id=${transId}, date_only=${recordDate}, type=${typeof recordDate}`);
+      } else {
+        console.log(`[REPLICATION] No record found in ${sourceNode} for trans_id=${transId}`);
       }
     } catch (e) {
       console.log(`[REPLICATION] Could not fetch date: ${e.message}`);
@@ -430,71 +618,51 @@ async function replicateWrite(sourceNode, query) {
   if (sourceNode === 'node0') {
     // Master replicates to fragments
     if (recordDate) {
-      targets.push(recordDate < FRAG_BOUNDARY ? 'node1' : 'node2');
+      // recordDate is now a string like '1997-01-01', compare directly
+      const recordDateStr = recordDate.toString();
+      const boundaryDateStr = '1997-01-01';
+      const targetNode = recordDateStr < boundaryDateStr ? 'node1' : 'node2';
+      targets.push(targetNode);
+      console.log(`[REPLICATION] Record date: ${recordDateStr}, Boundary: ${boundaryDateStr}, Target: ${targetNode}`);
     } else {
       targets.push('node1', 'node2'); // Unknown date - replicate to both
+      console.log(`[REPLICATION] No date found, replicating to both fragments`);
     }
   } else {
     // Fragments replicate back to master
     targets.push('node0');
   }
 
-  console.log(`[REPLICATION] ${sourceNode} → [${targets.join(', ')}] trans_id=${transId}`);
+  console.log(`[REPLICATION] ${sourceNode} → [${targets.join(', ')}] trans_id=${transId}, recordDate=${recordDate}`);
 
-  // Execute replication to each target
+  // Use Two-Phase Commit for atomic replication
+  const twoPC_result = await twoPhaseCommit(sourceNode, query, targets);
+  
+  // Log results to replication queue
   const results = [];
-  for (const target of targets) {
-    // Pre-check: Skip replication if target is marked as failed
-    if (simulatedFailures[target]) {
-      console.log(`[REPLICATION SKIP] ${sourceNode} → ${target}: Node marked as failed (simulatedFailures[${target}] = true)`);
-      const entry = {
-        id: uuidv4(),
-        source: sourceNode,
-        target,
-        query,
-        status: 'failed',
-        error: `Node ${target} is offline (simulated failure)`,
-        time: new Date()
-      };
-      replicationQueue.push(entry);
-      results.push(entry);
-      continue; // Skip to next target - DO NOT execute query
-    }
-
-    // If we get here, the node is NOT marked as failed
-    console.log(`[REPLICATION ATTEMPT] ${sourceNode} → ${target}: Node is online (simulatedFailures[${target}] = ${simulatedFailures[target]})`);
-    
+  for (const result of twoPC_result.results) {
     const entry = {
       id: uuidv4(),
       source: sourceNode,
-      target,
+      target: result.target,
       query,
-      status: 'pending',
-      time: new Date()
+      status: result.prepared ? 'replicated' : 'failed',
+      error: result.reason,
+      time: new Date(),
+      protocol: '2PC'
     };
-
-    try {
-      const conn = await pools[target].getConnection();
-      await conn.query(query);
-      conn.release();
-      
-      entry.status = 'replicated';
-      console.log(`[REPLICATION SUCCESS] ${sourceNode} → ${target}`);
-    } catch (e) {
-      entry.status = 'failed';
-      entry.error = e.message;
-      console.log(`[REPLICATION FAILED] ${sourceNode} → ${target}: ${e.message}`);
-    }
-
     replicationQueue.push(entry);
     results.push(entry);
   }
-
+  
+  // Persist logs asynchronously
+  persistLogs().catch(err => console.error('[ERROR] Failed to persist after replication:', err.message));
+  
   return results;
 }
 
 /**
- * Replay failed replications to a recovered node
+ * Replay failed replications to a recovered node with retry mechanism
  * @param {string} recoveredNode - The node that has been recovered (e.g., 'node1')
  * @returns {Object} Summary of replay results
  */
@@ -510,6 +678,7 @@ async function replayFailedReplications(recoveredNode) {
     total: failedReplications.length,
     success: 0,
     failed: 0,
+    retryable: [],
     details: []
   };
   
@@ -524,30 +693,51 @@ async function replayFailedReplications(recoveredNode) {
       // Update entry status
       entry.status = 'replicated';
       entry.recoveryTime = new Date();
+      entry.retryCount = (entry.retryCount || 0) + 1;
       entry.error = undefined;
       
       results.success++;
       results.details.push({
         id: entry.id,
         query: entry.query.substring(0, 100),
-        status: 'success'
+        status: 'success',
+        attempts: entry.retryCount
       });
       
       console.log(`[RECOVERY] ✓ Successfully replayed transaction ${entry.id}`);
     } catch (error) {
+      entry.retryCount = (entry.retryCount || 0) + 1;
+      entry.lastError = error.message;
+      
+      // Decide if retryable (max 3 attempts)
+      if (entry.retryCount < 3) {
+        entry.status = 'retry_pending';
+        results.retryable.push(entry.id);
+        console.log(`[RECOVERY] ⚠ Failed (attempt ${entry.retryCount}/3) - will retry: ${error.message}`);
+      } else {
+        entry.status = 'failed_permanent';
+        console.log(`[RECOVERY] ✗ Failed permanently after ${entry.retryCount} attempts: ${error.message}`);
+      }
+      
       results.failed++;
       results.details.push({
         id: entry.id,
         query: entry.query.substring(0, 100),
-        status: 'failed',
-        error: error.message
+        status: entry.status,
+        error: error.message,
+        attempts: entry.retryCount
       });
-      
-      console.log(`[RECOVERY] ✗ Failed to replay transaction ${entry.id}: ${error.message}`);
     }
   }
   
+  // Persist updated queue
+  await persistLogs();
+  
   console.log(`[RECOVERY] Summary for ${recoveredNode}: ${results.success} succeeded, ${results.failed} failed out of ${results.total} total`);
+  if (results.retryable.length > 0) {
+    console.log(`[RECOVERY] ${results.retryable.length} transactions pending retry`);
+  }
+  
   return results;
 }
 
@@ -670,14 +860,11 @@ app.post('/api/query/execute', async (req, res) => {
 
   console.log(`[QUERY] Executing on ${node} (node is online)`);
   
-  const logEntry = {
-    transactionId,
-    node,
-    query,
-    isolationLevel: effectiveIsolation,
-    startTime: new Date(),
-    status: 'pending'
-  };
+  // Write-Ahead Log: Log BEFORE execution
+  const logEntry = writeAheadLog(transactionId, node, query, effectiveIsolation);
+  
+  // Persist WAL to disk immediately
+  await persistLogs();
 
   let connection = null;
   const isWrite = isWriteQuery(query);
@@ -717,7 +904,30 @@ app.post('/api/query/execute', async (req, res) => {
       console.log(`[WRITE] trans_id=${transId} added to writeSet of ${transactionId}`);
       
     } else if (!isWrite && transId) {
-      // Read operation - acquire read lock (if needed by isolation level)
+      // Read operation - check for snapshot first (REPEATABLE_READ)
+      if (effectiveIsolation === 'REPEATABLE_READ' && txn.snapshot[transId]) {
+        console.log(`[REPEATABLE_READ] Using cached snapshot for trans_id=${transId}`);
+        const cachedResults = txn.snapshot[transId];
+        
+        logEntry.status = 'committed';
+        logEntry.endTime = new Date();
+        logEntry.results = cachedResults;
+        logEntry.readSet = Array.from(txn.readSet);
+        logEntry.writeSet = Array.from(txn.writeSet);
+        logEntry.snapshotUsed = true;
+        
+        connection.release();
+        transactionLog.push(logEntry);
+        
+        return res.json({
+          transactionId,
+          results: cachedResults,
+          snapshotUsed: true,
+          logEntry
+        });
+      }
+      
+      // Acquire read lock (if needed by isolation level)
       const lockResult = await acquireLock(transactionId, transId, 'read', effectiveIsolation);
       
       if (!lockResult.success) {
@@ -744,6 +954,14 @@ app.post('/api/query/execute', async (req, res) => {
 
     // Execute query
     const [results] = await connection.query(query);
+    
+    // Store snapshot for REPEATABLE_READ on first read
+    if (!isWrite && transId && effectiveIsolation === 'REPEATABLE_READ') {
+      if (!txn.snapshot[transId]) {
+        txn.snapshot[transId] = results;
+        console.log(`[REPEATABLE_READ] Snapshot stored for trans_id=${transId}`);
+      }
+    }
 
     logEntry.status = 'committed';
     logEntry.endTime = new Date();
@@ -757,9 +975,9 @@ app.post('/api/query/execute', async (req, res) => {
 
     // ISOLATION LEVEL SPECIFIC LOCK RELEASE
     if (effectiveIsolation === 'READ_COMMITTED' && transId) {
-      // READ_COMMITTED: Release locks immediately
+      // READ_COMMITTED: Release locks immediately (both read and write)
       releaseLock(transactionId, transId, effectiveIsolation);
-      console.log(`[READ_COMMITTED] Lock released immediately for trans_id=${transId}`);
+      console.log(`[READ_COMMITTED] Lock released immediately for trans_id=${transId} (${isWrite ? 'write' : 'read'})`);
     }
     // For REPEATABLE_READ and SERIALIZABLE: Locks released at commit
     
@@ -767,7 +985,10 @@ app.post('/api/query/execute', async (req, res) => {
     commitTransaction(transactionId);
     
     connection.release();
-    transactionLog.push(logEntry);
+    
+    // Update log entry in-place (already in transactionLog from WAL)
+    // Persist updated status to disk
+    await persistLogs();
 
     res.json({
       transactionId,
@@ -787,7 +1008,8 @@ app.post('/api/query/execute', async (req, res) => {
       connection.release();
     }
     
-    transactionLog.push(logEntry);
+    // Persist failed transaction
+    await persistLogs();
 
     res.status(500).json({
       transactionId,
@@ -858,12 +1080,24 @@ app.post('/api/nodes/kill', (req, res) => {
   }
 });
 
-// 8. Simulate Node Recovery
+// 8. Simulate Node Recovery with Concurrency Control
 app.post('/api/nodes/recover', async (req, res) => {
   const { node } = req.body;
   
+  // Check if recovery already in progress
+  if (recoveryInProgress[node]) {
+    return res.status(409).json({ 
+      error: `Recovery already in progress for ${node}`,
+      status: 'conflict',
+      message: 'Please wait for the current recovery operation to complete'
+    });
+  }
+  
   try {
     if (nodeStatus[node]) {
+      // Lock recovery for this node
+      recoveryInProgress[node] = true;
+      
       // Remove simulated failure flag
       simulatedFailures[node] = false;
       delete nodeStatus[node].failureTime;
@@ -876,17 +1110,24 @@ app.post('/api/nodes/recover', async (req, res) => {
       // Check health after removing failure simulation
       await checkNodeHealth();
       
+      // Unlock recovery
+      recoveryInProgress[node] = false;
+      
       res.json({
         message: `${node} recovery completed`,
         nodeStatus: nodeStatus[node],
         replayedTransactions: replayResults.success,
         failedReplays: replayResults.failed,
-        totalProcessed: replayResults.total
+        totalProcessed: replayResults.total,
+        retryable: replayResults.retryable.length,
+        details: replayResults.details
       });
     } else {
       res.status(400).json({ error: 'Invalid node' });
     }
   } catch (error) {
+    // Unlock recovery on error
+    recoveryInProgress[node] = false;
     res.status(500).json({ error: error.message });
   }
 });
@@ -1018,14 +1259,23 @@ function getRecentlyUpdatedTransIds() {
 }
 
 // 10. Clear Logs (for testing)
-app.post('/api/logs/clear', (req, res) => {
+app.post('/api/logs/clear', async (req, res) => {
   transactionLog = [];
   replicationQueue = [];
   transactions = {};
   lockTable = {};
   
+  // Clear persisted files
+  try {
+    await fs.unlink(LOG_FILE).catch(() => {});
+    await fs.unlink(REPLICATION_QUEUE_FILE).catch(() => {});
+    console.log('[CLEAR] Persisted log files deleted');
+  } catch (error) {
+    console.error('[CLEAR] Error deleting log files:', error.message);
+  }
+  
   res.json({
-    message: 'Logs and locks cleared',
+    message: 'Logs, locks, and persisted files cleared',
     timestamp: new Date()
   });
 });
@@ -1039,6 +1289,7 @@ app.use((err, req, res, next) => {
 // Initialize and start server
 async function start() {
   await initializePools();
+  await loadPersistedLogs(); // Load transaction history from disk
   
   app.listen(PORT, () => {
     console.log(`\n[SERVER] Distributed DB Simulator Backend running on port ${PORT}`);
@@ -1047,6 +1298,11 @@ async function start() {
     console.log(`  - Node 0 (Master): ${dbConfig.node0.host}:${dbConfig.node0.port}`);
     console.log(`  - Node 1 (Fragment A): ${dbConfig.node1.host}:${dbConfig.node1.port}`);
     console.log(`  - Node 2 (Fragment B): ${dbConfig.node2.host}:${dbConfig.node2.port}`);
+    console.log(`\nFeatures:`);
+    console.log(`  - Two-Phase Commit (2PC) for atomic replication`);
+    console.log(`  - Write-Ahead Logging (WAL) for crash recovery`);
+    console.log(`  - Transaction log persistence`);
+    console.log(`  - Automatic retry mechanism (max 3 attempts)`);
   });
 }
 

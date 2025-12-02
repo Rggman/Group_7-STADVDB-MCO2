@@ -1,0 +1,264 @@
+[
+  {
+    "id": "0cdce4e5-f137-4878-87cf-a9d63271f8c7",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 234 WHERE trans_id = 16873",
+    "status": "replicated",
+    "time": "2025-12-02T09:15:36.783Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "4c746895-165d-4d1b-9cee-f4fe5dd600b8",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 1 WHERE trans_id = 82113",
+    "status": "replicated",
+    "time": "2025-12-02T09:17:11.173Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "38fc4f68-7031-4e4c-ac5d-b4303d699157",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 123 WHERE trans_id = 82113",
+    "status": "replicated",
+    "time": "2025-12-02T09:18:01.469Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "0378e067-bd8b-4103-b8ca-45f87596c727",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 2 WHERE trans_id = 16873",
+    "status": "replicated",
+    "time": "2025-12-02T09:20:24.730Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "22f1d6ff-b8bd-4ece-a95c-633210d07239",
+    "source": "node0",
+    "target": "node2",
+    "query": "UPDATE trans SET amount = 25 WHERE trans_id = 16873",
+    "status": "replicated",
+    "time": "2025-12-02T09:23:32.463Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "ba2e9244-60e3-4857-bf15-7c879f29fcc0",
+    "source": "node0",
+    "target": "node2",
+    "query": "UPDATE trans SET amount = 12 WHERE trans_id = 16873",
+    "status": "replicated",
+    "time": "2025-12-02T09:24:32.574Z",
+    "protocol": "2PC",
+    "recoveryTime": "2025-12-02T09:24:38.685Z",
+    "retryCount": 1
+  },
+  {
+    "id": "548a8420-2c16-465b-bba1-853a42091bff",
+    "source": "node0",
+    "target": "node2",
+    "query": "UPDATE trans SET amount = 11 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:25:11.767Z",
+    "protocol": "2PC",
+    "recoveryTime": "2025-12-02T09:25:37.899Z",
+    "retryCount": 1
+  },
+  {
+    "id": "b1d33946-afb9-4541-8e28-56af1b205b9f",
+    "source": "node0",
+    "target": "node2",
+    "query": "UPDATE trans SET amount = 22 WHERE trans_id = 16873",
+    "status": "replicated",
+    "time": "2025-12-02T09:25:25.613Z",
+    "protocol": "2PC",
+    "recoveryTime": "2025-12-02T09:25:37.941Z",
+    "retryCount": 1
+  },
+  {
+    "id": "31350811-378c-4177-904e-597dfe8f2a75",
+    "source": "node0",
+    "target": "node2",
+    "query": "UPDATE trans SET amount = 16 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:25:52.900Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "f37e4673-122c-4eaa-ad6b-4c830ad8e6a0",
+    "source": "node0",
+    "target": "node2",
+    "query": "UPDATE trans SET amount = 15 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:26:17.210Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "8febea17-e3f9-4e0b-b6fa-3d6190b0dd4b",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 6 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:29:11.642Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "8c398d7e-7c0a-4a36-8a9c-3e406cb4aeeb",
+    "source": "node0",
+    "target": "node2",
+    "query": "UPDATE trans SET amount = 66 WHERE trans_id = 82113",
+    "status": "replicated",
+    "time": "2025-12-02T09:29:24.935Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "169bc158-bec0-466f-a4af-b0f17fcb466f",
+    "source": "node0",
+    "target": "node2",
+    "query": "UPDATE trans SET amount = 25 WHERE trans_id = 82113",
+    "status": "replicated",
+    "time": "2025-12-02T09:29:55.619Z",
+    "protocol": "2PC",
+    "recoveryTime": "2025-12-02T09:30:11.785Z",
+    "retryCount": 1
+  },
+  {
+    "id": "1fdd9faf-dd9b-4059-a87f-3c98f7b64b63",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 20 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:30:07.242Z",
+    "protocol": "2PC",
+    "recoveryTime": "2025-12-02T09:30:10.812Z",
+    "retryCount": 1
+  },
+  {
+    "id": "9a8899a9-2b57-4395-9c57-b62e3b6b93d2",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 35 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:32:33.824Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "3755888a-e921-4a81-89ee-05851916ed12",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 40 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:32:45.226Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "3729c6bc-f202-48af-9077-e1b7650baf62",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 790 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:37:27.504Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "8f6b62ff-47d4-47b5-8584-60517b1252e9",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 800 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:43:23.002Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "d78f47e5-a542-4393-a5cd-039c46b65a61",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 900 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:46:10.942Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "98974252-685d-40e6-9b24-912065497e87",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 999 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:50:52.352Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "3d61e81e-30e1-4344-af28-c62eb1a3aaac",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 123 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:56:05.361Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "2b5a1211-14d2-43e3-a405-74211abfad66",
+    "source": "node1",
+    "target": "node0",
+    "query": "UPDATE trans SET amount = 456 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:56:05.618Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "dff68ffd-6260-45fd-8f9d-980dde7ca9f1",
+    "source": "node1",
+    "target": "node0",
+    "query": "UPDATE trans SET amount = 222 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:59:40.054Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "88b88f99-35c8-40ea-9ccd-339b11ec7afc",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 111 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T09:59:40.060Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "3d221f47-2c00-45a5-8a18-ab212a4c7cc0",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 333 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T10:00:03.475Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "20436018-72e9-450e-92be-6acc48d5006f",
+    "source": "node1",
+    "target": "node0",
+    "query": "UPDATE trans SET amount = 444 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T10:00:03.699Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "18be2d72-1abc-4189-b299-559da18ebb68",
+    "source": "node0",
+    "target": "node1",
+    "query": "UPDATE trans SET amount = 555 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T10:00:16.596Z",
+    "protocol": "2PC"
+  },
+  {
+    "id": "cfbb40d8-b32d-42f2-9ad4-e1b5c717071d",
+    "source": "node1",
+    "target": "node0",
+    "query": "UPDATE trans SET amount = 666 WHERE trans_id = 1117247",
+    "status": "replicated",
+    "time": "2025-12-02T10:00:16.841Z",
+    "protocol": "2PC"
+  }
+]

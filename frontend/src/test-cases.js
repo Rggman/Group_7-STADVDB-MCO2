@@ -55,6 +55,14 @@ export async function case2WritePlusReads(writerNode, readerA, readerB, recordId
   
   console.log(`[CASE 2] All operations completed`);
   
+  // Add a post-write verification read to show the final committed state
+  console.log(`[CASE 2] Performing post-write verification read...`);
+  const finalRead = await apiClient.post('/query/execute', { 
+    node: writerNode, 
+    query: selectQuery, 
+    isolationLevel: 'READ_COMMITTED' // Use READ_COMMITTED to ensure we see the final committed state
+  });
+  
   const unwrap = r => r.data.results || [];
   const unwrapWrite = r => {
     return {
@@ -64,25 +72,30 @@ export async function case2WritePlusReads(writerNode, readerA, readerB, recordId
   };
 
   const write = unwrapWrite(writeResult);
-  const writerData = unwrap(wRead);
+  const writerData = unwrap(finalRead); // Use post-write read instead of concurrent read
+  const concurrentWriterRead = unwrap(wRead); // Keep concurrent read for analysis
   const readerAData = unwrap(aRead);
   const readerBData = unwrap(bRead);
 
   // Check if readers saw different values (expected for READ_UNCOMMITTED - dirty reads)
-  const values = [
-    writerData[0]?.amount,
+  const concurrentValues = [
+    concurrentWriterRead[0]?.amount,
     readerAData[0]?.amount,
     readerBData[0]?.amount
   ].filter(v => v !== undefined);
   
-  const uniqueValues = [...new Set(values)];
-  const sawDifferentValues = uniqueValues.length > 1;
+  const finalValue = writerData[0]?.amount;
+  
+  const uniqueConcurrentValues = [...new Set(concurrentValues)];
+  const sawDifferentValues = uniqueConcurrentValues.length > 1;
 
   if (sawDifferentValues) {
-    console.log(`[CASE 2] ⚠️ DIRTY READS DETECTED: Read values varied: [${uniqueValues.join(', ')}]`);
+    console.log(`[CASE 2] ⚠️ DIRTY READS DETECTED: Concurrent read values varied: [${uniqueConcurrentValues.join(', ')}]`);
+    console.log(`[CASE 2] Final committed value: ${finalValue}`);
     console.log(`[CASE 2] This is ${iso === 'READ_UNCOMMITTED' ? 'EXPECTED' : 'UNEXPECTED'} for ${iso}`);
   } else {
-    console.log(`[CASE 2] All reads consistent: ${values.length > 0 ? values[0] : 'N/A'}`);
+    console.log(`[CASE 2] All concurrent reads consistent: ${concurrentValues.length > 0 ? concurrentValues[0] : 'N/A'}`);
+    console.log(`[CASE 2] Final committed value: ${finalValue}`);
   }
 
   return {
@@ -94,14 +107,20 @@ export async function case2WritePlusReads(writerNode, readerA, readerB, recordId
       replication: write.replication
     },
     reads: {
-      writer: writerData,
+      writer: writerData, // Final committed state
+      readerA: readerAData,
+      readerB: readerBData
+    },
+    concurrentReads: {
+      writer: concurrentWriterRead, // Concurrent read during write
       readerA: readerAData,
       readerB: readerBData
     },
     concurrency: {
       sawDifferentValues,
-      uniqueValues,
-      expected: iso === 'READ_UNCOMMITTED'
+      uniqueValues: uniqueConcurrentValues,
+      finalValue,
+      expected: iso === 'read_UNCOMMITTED'
         ? 'May see different values (dirty reads allowed across all nodes)'
         : 'Should see consistent values (reads wait for write to commit)'
     }
